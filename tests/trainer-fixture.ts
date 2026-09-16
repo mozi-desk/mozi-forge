@@ -2,7 +2,8 @@
  * Purpose: Compose real public Harness services around a disposable Git repository.
  * Example: a test calls trainer_plan_save through tools, inspects disk, then disposes
  * its own Agent and subprocess services. No production runtime or browser is touched.
- * The versioned Trainer preset is mounted through the real Loader with Sleep tools.
+ * Focused training services and native shell/filesystem tools mount through the Loader.
+ * The separate Web test boots the complete generated standard Trainer preset.
  * Extra Agents can be created and driven through the same public tool executor so that
  * cross-session ownership rules stay testable without reaching into private state.
  */
@@ -23,6 +24,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
 import Commands from '@deepseek-ai/dsh-commands'
@@ -55,21 +57,24 @@ export async function fixture(adapter?: LlmAdapter) {
   await git(root, 'add', '.'); await git(root, 'commit', '-m', 'fixture baseline')
   const previousHome = process.env.DSH_HOME; process.env.DSH_HOME = home
   const ctx = new Context()
+  try {
   ctx.baseUrl = new URL('../', import.meta.url).href
   await ctx.plugin(Loader); ctx.loader.builtins.include = Include
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
   await ctx.plugin(SessionProjectionRegistry); await ctx.plugin(AgentLoop, { agents: [] })
-  await ctx.plugin(LocalSubprocessRuntime); await ctx.plugin(ShellEnv, { dshHome: home }); await ctx.plugin(LocalBashExecutor, { timeoutMs: 10000 }); await ctx.plugin(LocalJobRegistry, {})
+  await ctx.plugin(LocalFileSystem); await ctx.plugin(LocalSubprocessRuntime); await ctx.plugin(ShellEnv, { dshHome: home }); await ctx.plugin(LocalBashExecutor, { timeoutMs: 10000 }); await ctx.plugin(LocalJobRegistry, {})
   await ctx.plugin(Commands); await ctx.plugin(HostConnectionService, [])
   await ctx.plugin(JsonlPersistence, { root: join(home, 'sessions') })
   await ctx.plugin(SessionInsights, { projectRoot: root })
-  await ctx.plugin(HumanRequestService, { projectRoot: root }); await ctx.plugin(AgentTestService, { projectRoot: root }); await ctx.plugin(TrainerService, { projectRoot: root })
+  await ctx.plugin(HumanRequestService, { projectRoot: root }); await ctx.plugin(AgentTestService, { projectRoot: root }); let trainerFiber = ctx.plugin(TrainerService, { projectRoot: root }); await trainerFiber
   ctx.llm.registerAdapter(['fixture'], adapter ?? new QuietModel())
   const presetRoot = join(home, 'presets'), trainerPath = join(presetRoot, 'trainer')
   await mkdir(trainerPath, { recursive: true })
   const require = createRequire(import.meta.url)
   let preset = await readFile(require.resolve('@mozi-forge/runtime/presets/trainer/agent.cordis.yml'), 'utf8')
   for (const [marker, entry] of Object.entries({ __FORGE_TRAINER_PLUGIN__: '@mozi-forge/trainer-agent/plugin', __FORGE_AGENT_TEST_TOOL_PLUGIN__: '@mozi-forge/agent-test-plugin/tool', __FORGE_SLEEP_LOOP_TOOLS__: '@mozi-forge/sleep-loop-plugin/tools' })) preset = preset.replaceAll(marker, JSON.stringify(require.resolve(entry)))
+  preset = preset.replace(/- id: standard-capabilities\n[\s\S]*?(?=- id: trainer-agent)/u, '')
+  preset += `\n- id: native-bash\n  name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-bash'))}\n- id: native-fs\n  name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-fs'))}\n- id: native-search\n  name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-fs-search'))}\n  config: { sampleOverCapGlobResults: false }\n- id: native-jobs\n  name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-jobs'))}\n`
   await writeFile(join(trainerPath, 'agent.cordis.yml'), preset)
   await ctx.plugin(AgentPresets, { default: 'trainer', roots: [{ path: presetRoot, trust: 'user' }], includeUserRoot: false, includeShippedRoot: false })
   await ctx.plugin(AgentDefaultModel, { provider: 'fixture', model: 'fixture' })
@@ -84,11 +89,28 @@ export async function fixture(adapter?: LlmAdapter) {
   }
   const handle = await createAgent()
   const callAs = async (target: Awaited<ReturnType<typeof createAgent>>, name: string, args: Record<string, unknown> = {}) => {
-    const result = await ctx.tools.execute({ callId: ToolCallId(`fixture-${++sequence}`), name, arguments: args, agent: target.agent, signal: new AbortController().signal })
+    const result = await ctx.tools.execute({ callId: ToolCallId(`fixture-${++sequence}`), name, arguments: name === 'bash' ? { description: 'Execute fixture command', ...args } : args, agent: target.agent, signal: new AbortController().signal })
     const text = result.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     if (result.isError) throw new Error(text)
-    return JSON.parse(text)
+    return structuredClone(result.value) as any
   }
-  const call = (name: string, args: Record<string, unknown> = {}) => callAs(handle, name, args)
-  return { root, home, ctx, handle, call, callAs, createAgent, async dispose() { for (const target of created.splice(0)) await target.dispose(); await ctx.fiber.dispose(); if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome; await rm(root, { recursive: true, force: true }) } }
+  let active = handle
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const result = await callAs(active, name, args)
+    if (name === 'trainer_workspace_prepare') {
+      const agent = ctx.agents.get(SessionId(result.executionSessionId))
+      if (!agent) throw new Error('Execution session missing')
+      active = { agent, dispose: async () => {} }
+    }
+    return result
+  }
+  return { root, home, ctx, handle, call, callAs, createAgent, async restartTrainer() { await trainerFiber.dispose(); trainerFiber = ctx.plugin(TrainerService, { projectRoot: root }); await trainerFiber }, async dispose() { for (const target of created.splice(0)) await target.dispose(); await ctx.fiber.dispose(); if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome; await rm(root, { recursive: true, force: true }) } }
+  } catch (error) {
+    try { await ctx.fiber.dispose() } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome
+      await rm(root, { recursive: true, force: true })
+    }
+    throw error
+  }
+
 }

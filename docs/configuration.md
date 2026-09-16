@@ -27,7 +27,10 @@ Pass `hostPatch` before the application's patch using repeated Harness `--patch`
 arguments. Later patch rows replace the targeted row's complete configuration.
 Pass `DSH_HOME` to the child. The caller owns its process and signal lifecycle.
 
-Shared presets are `trainer`, `tester` and `reviewer`. Application preset files
+Shared presets are `trainer`, `tester` and `reviewer`. The caller installs
+`@deepseek-ai/dsh`; runtime derives Trainer capabilities from that installation's
+shipped `standard` preset, including its adjacent assets. A standard Harness Host
+profile supplies the matching providers and registries. Application preset files
 replace matching shared files. Place plugin export mappings and additional package
 names in `config/runtime.json` to use the same composition in startup and evaluation:
 

@@ -1,4 +1,8 @@
-# Trainer tools use the shared local Harness shell and Agent Test executor.
+# Standard capabilities come from the caller's installed Harness release.
+- id: standard-capabilities
+  name: cordis:include
+  config:
+    path: ./standard/agent.cordis.yml
 - id: trainer-agent
   name: __FORGE_TRAINER_PLUGIN__
 - id: agent-test-tool

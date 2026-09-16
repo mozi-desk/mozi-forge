@@ -21,9 +21,9 @@ async function training(f: Awaited<ReturnType<typeof fixture>>) {
 async function proposal(f: Awaited<ReturnType<typeof fixture>>, id: string, checks: string[] = []) {
   return f.call('human_request_submit', { type: 'training-merge', planId: id, title: 'Merge changes', body: 'Review the full diff.', checks })
 }
-it('loads the versioned Trainer preset with the configured Trainer tools and executes shell in the HEAD training workspace', async () => {
+it('hands training to one execution session and uses native tools in its HEAD workspace', async () => {
   const f = await setup()
-  expect(f.ctx.tools.schemas(f.handle.agent).map(t => t.name).sort()).toEqual(['trainer_plan_list','sleep_loop_schedule','sleep_loop_status','session_inspect','session_query','session_read','bash','trainer_plan_save','trainer_plan_read','trainer_workspace_prepare','trainer_merge','human_request_submit','human_request_read','agent_test_preflight','agent_test_list','agent_test_start','agent_test_status','agent_test_wait','agent_test_read','agent_test_cancel'].sort())
+  expect(f.ctx.tools.schemas(f.handle.agent).map(t => t.name).sort()).toEqual(expect.arrayContaining(['trainer_plan_list','sleep_loop_schedule','sleep_loop_status','session_inspect','session_query','session_read','bash','trainer_plan_save','trainer_plan_read','trainer_workspace_prepare','trainer_merge','human_request_submit','human_request_read','agent_test_preflight','agent_test_list','agent_test_start','agent_test_status','agent_test_wait','agent_test_read','agent_test_cancel'].sort()))
   await writeFile(join(f.root, 'agent.txt'), 'local unsaved work')
   const { plan, workspace } = await training(f)
   expect(plan.tokenBudget).toBe(10000000); expect(plan.iterationBudget).toBe(3)
@@ -34,6 +34,44 @@ it('loads the versioned Trainer preset with the configured Trainer tools and exe
   await f.call('trainer_workspace_prepare', { plan_id: plan.id })
   expect(await readFile(join(workspace, 'agent.txt'), 'utf8')).toBe('improved')
   expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('local unsaved work')
+  const saved = await f.ctx.trainers.read(plan.id)
+  const execution = f.ctx.agents.get(SessionId(saved.executionSessionId!))!
+  expect(execution.session.header.cwd).toBe(workspace)
+  expect(execution.session.header.parentSession).toBe(f.handle.agent.id)
+  expect((await f.call('trainer_workspace_prepare', { plan_id: plan.id })).executionSessionId).toBe(saved.executionSessionId)
+  await f.call('write', { file_path: 'native.txt', content: 'native file tools' })
+  expect(JSON.stringify(await f.call('read', { file_path: 'native.txt' }))).toContain('native file tools')
+  expect(JSON.stringify(await f.call('glob', { pattern: '*.txt' }))).toContain('native.txt')
+  await expect(readFile(join(f.root, 'native.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+  const job = await f.call('bash', { command: 'pwd', run_in_background: true })
+  expect(JSON.stringify(await f.call('job_output', { job_id: job.jobId, wait: true, timeout_ms: 5000 }))).toContain(workspace)
+})
+
+it('resumes the same durable execution session after the owning service restarts', async () => {
+  const f = await setup(), { plan, workspace } = await training(f)
+  const executionSessionId = (await f.ctx.trainers.read(plan.id)).executionSessionId!
+  const execution = f.ctx.agents.get(SessionId(executionSessionId))!
+  await f.call('write', { file_path: 'progress.txt', content: 'keep this progress' })
+  await f.ctx.sessions.flush(execution.session)
+  await f.restartTrainer()
+  const resumed = await f.callAs(f.handle, 'trainer_workspace_prepare', { plan_id: plan.id })
+  expect(resumed.executionSessionId).toBe(executionSessionId)
+  expect(f.ctx.agents.get(SessionId(executionSessionId))!.session.header.cwd).toBe(workspace)
+  expect(await readFile(join(workspace, 'progress.txt'), 'utf8')).toBe('keep this progress')
+  expect((await f.ctx.trainers.read(plan.id)).sessionId).toBe(String(f.handle.agent.id))
+})
+
+it('keeps concurrent plans in distinct native tool workspaces', async () => {
+  const f = await setup(), first = await training(f), other = await f.createAgent()
+  const second = await f.callAs(other, 'trainer_plan_save', { title: 'Second workspace', description: 'Isolate concurrent work.', body: 'Change only this plan.' })
+  const prepared = await f.callAs(other, 'trainer_workspace_prepare', { plan_id: second.id })
+  const agent = f.ctx.agents.get(SessionId(prepared.executionSessionId))!
+  await f.call('write', { file_path: 'isolation.txt', content: 'first' })
+  await f.callAs({ agent, dispose: async () => {} }, 'write', { file_path: 'isolation.txt', content: 'second' })
+  expect(await readFile(join(first.workspace, 'isolation.txt'), 'utf8')).toBe('first')
+  expect(await readFile(join(prepared.workspace, 'isolation.txt'), 'utf8')).toBe('second')
+  await expect(readFile(join(f.root, 'isolation.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(f.callAs(other, 'trainer_workspace_prepare', { plan_id: first.plan.id })).rejects.toThrow('another session')
 })
 it('requires human approval, integrates once and records completion only after Git succeeds', async () => {
   const f = await setup(), { plan, workspace } = await training(f)
@@ -130,7 +168,7 @@ it('keeps allowance advisory and records uncertain token coverage', async () => 
   const brief = await f.call('trainer_plan_read', { plan_id: plan.id })
   expect(brief.usage.complete).toBe(false)
   await f.call('trainer_workspace_prepare', { plan_id: plan.id })
-  await expect(f.call('bash', { command: 'exit 4' })).rejects.toThrow('exitCode')
+  expect((await f.call('bash', { command: 'exit 4' })).exitCode).toBe(4)
   await expect(f.call('bash', { command: 'printf still-available' })).resolves.toBeTruthy()
 })
 

@@ -48,6 +48,9 @@ cases:
             - path: result.json
               json: [{ pointer: /answer, equals: OK }]
 `)
+  await mkdir(join(root, '.agents/skills/worktree-probe'), { recursive: true })
+  await writeFile(join(root, 'AGENTS.md'), '# Fixture instructions\nFORGE_HEAD_INSTRUCTIONS: Work on the supplied fixture task.\n')
+  await writeFile(join(root, '.agents/skills/worktree-probe/SKILL.md'), '---\nname: worktree-probe\ndescription: Inspect the training worktree fixture.\n---\nFORGE_HEAD_SKILL: Use the current execution workspace.\n')
   await git(root, 'init', '-b', 'main')
   await git(root, 'config', 'user.name', 'Trainer Fixture')
   await git(root, 'config', 'user.email', 'trainer@example.invalid')

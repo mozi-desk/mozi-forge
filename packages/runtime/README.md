@@ -29,3 +29,12 @@ pnpm --filter @mozi-forge/runtime test:unit
 ```
 
 Root integration tests exercise shared services and the real Web execution path.
+
+## Trainer composition
+
+The caller installs `@deepseek-ai/dsh` alongside Forge. Preparation reads that
+installation's shipped `standard` preset, copies its assets beneath the generated
+Trainer preset, and resolves its plugins from the same installation. Trainer
+provides the persona while standard tools and their guidance remain assembled.
+Caller preset files overlay this generated composition last. Use a Harness Host
+profile such as `web` or `headless` to supply the standard providers and registries.

@@ -18,8 +18,14 @@ import { promisify } from 'node:util'
 import { mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { MessageId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { atomicJson, safeId } from '@mozi-forge/human-request-plugin/host'
 import type {} from '@mozi-forge/agent-test-plugin/host'
 import { linkWorkcopyDependencies } from '@mozi-forge/agent-test-plugin/workcopy'
@@ -35,14 +41,16 @@ declare module '@deepseek-ai/cordis' { interface Context { trainers: TrainerServ
 const run = promisify(execFile)
 const excludedParts = new Set(['.runtime', 'node_modules', '.git', '.npmrc', '.credentials.yml', '.credentials.yaml'])
 export class TrainerService extends Service {
-  static inject = ['humanRequests', 'agentTests', 'sessionInsights']
+  static inject = ['humanRequests', 'agentTests', 'sessionInsights', 'agents', 'agentPresets', 'agentDefaultModel', 'sessions', 'sessionPersistence']
   static Config = Config
   readonly projectRoot: string
   readonly root: string
+  private handles = new Map<string, AgentHandle>()
   private mergeListeners = new Set<() => Promise<void>>()
   private queues = new Map<string, Promise<unknown>>()
   constructor(private host: Context, config: Config) {
     super(host, 'trainers')
+    host.effect(() => async () => { for (const handle of this.handles.values()) await handle.dispose(); this.handles.clear() })
     this.projectRoot = resolve(config.projectRoot)
     this.root = join(resolve(process.env.DSH_HOME ?? join(this.projectRoot, '.runtime')), 'trainning')
   }
@@ -51,7 +59,7 @@ export class TrainerService extends Service {
   async read(id: string, owner?: string): Promise<TrainingPlan> {
     const plan = await this.load(id)
     if (!plan) throw new Error(`Unknown training plan: ${id}`)
-    if (owner && plan.sessionId !== owner) throw new Error('Plan belongs to another session; choose another id')
+    if (owner && plan.sessionId !== owner && plan.executionSessionId !== owner) throw new Error('Plan belongs to another session; choose another id')
     plan.description ??= plan.body.split(/\r?\n\s*\r?\n/).find(paragraph => paragraph.trim())?.trim() ?? plan.title
     return plan
   }
@@ -64,7 +72,7 @@ export class TrainerService extends Service {
   /** save() lookup: an absent plan is simply a new plan, while an existing one still belongs to its session. */
   private async existing(id: string, owner: string): Promise<TrainingPlan | undefined> {
     const plan = await this.load(id)
-    if (plan && plan.sessionId !== owner) throw new Error('Plan belongs to another session; choose another id')
+    if (plan && plan.sessionId !== owner && plan.executionSessionId !== owner) throw new Error('Plan belongs to another session; choose another id')
     return plan
   }
   /** Validate frozen session references before saving user-authored fields to plan.json. Environment and completion facts remain Host-owned. */
@@ -80,7 +88,7 @@ export class TrainerService extends Service {
     })
   }
   /** Prepare once at HEAD; a retry returns the existing worktree without resetting it. */
-  async prepare(id: string, owner: string): Promise<{ plan: TrainingPlan; workspace: string; planDirectory: string }> {
+  async prepare(id: string, owner: string): Promise<{ plan: TrainingPlan; workspace: string; planDirectory: string; executionSessionId: string; handoff: boolean }> {
     return this.serial(id, async () => {
       const plan = await this.read(id, owner), workspace = this.workspace(id)
       if (!plan.baseCommit) {
@@ -96,8 +104,53 @@ export class TrainerService extends Service {
       if (!await realpath(join(workspace, 'node_modules')).catch(() => undefined) && await lock(this.projectRoot) === await lock(workspace)) await linkWorkcopyDependencies(this.projectRoot, workspace)
       await mkdir(join(this.directory(id), 'proposals'), { recursive: true })
       await mkdir(join(this.directory(id), 'evaluations'), { recursive: true })
-      return { plan, workspace, planDirectory: this.directory(id) }
+      if (!plan.executionSessionId) {
+        plan.executionSessionId = `trainer-execution-${randomUUID()}`
+        await atomicJson(join(this.directory(id), 'plan.json'), plan)
+      }
+      await this.startExecution(plan)
+      return { plan, workspace, planDirectory: this.directory(id), executionSessionId: plan.executionSessionId, handoff: owner !== plan.executionSessionId }
     })
+  }
+  /**
+   * A plan keeps one durable execution identity. Persist its inbox before waking
+   * the loop; retrying prepare resumes the same session and never resets its cwd.
+   * The analysis session remains the plan owner; both identities can inspect and
+   * operate it, while each human request retains its original session ownership.
+   */
+  private async startExecution(plan: TrainingPlan): Promise<void> {
+    if (plan.merge || !plan.executionSessionId) return
+    const workspaceRecord = await this.host.get('workspaceRegistry')?.create(this.workspace(plan.id), `Training: ${plan.title}`)
+    const id = SessionId(plan.executionSessionId)
+    let agent = this.host.agents.get(id)
+    let resumed = false
+    if (!agent) {
+      const exists = (await this.host.sessionPersistence.list()).some(row => row.id === id)
+      resumed = exists
+      const setup = async (ctx: Context) => { await this.host.agentPresets.mount(ctx, 'trainer') }
+      const agentOptions = this.host.agentDefaultModel.currentSelection()
+      const handle = exists
+        ? await this.host.agents.resume({ resumeSessionId: id, agentOptions, setup })
+        : await this.host.agents.create({ sessionId: id, meta: { cwd: this.workspace(plan.id), parentSession: SessionId(plan.sessionId), agentPreset: 'trainer' }, agentOptions, setup })
+      this.handles.set(String(id), handle)
+      agent = handle.agent
+    }
+    if (agent.session.header.cwd !== this.workspace(plan.id)) throw new Error('Training execution workspace mismatch')
+    await workspaceRecord?.attachSession(id)
+    let messageId = MessageId(`training-execution-${plan.id}`)
+    const events = agent.session.snapshotEvents()
+    const consumed = events.some(event => event.type === 'user/message' && event.data.id === messageId)
+    const reviews = await this.host.humanRequests.list({ planId: plan.id })
+    if (consumed) {
+      if (!resumed || reviews.some(request => request.status === 'pending')) return
+      messageId = MessageId(`training-resume-${plan.id}-${events.findLast(event => event.type === 'turn/end')?.seq ?? 0}`)
+      if (events.some(event => event.type === 'user/message' && event.data.id === messageId)) return
+    }
+    const message = { ...createUserMessage({ source: { kind: 'plugin', plugin: name, form: 'notice', summary: `Execute training plan ${plan.id}` }, content: [{ type: 'text', text: `Execute the prepared Training Plan ${plan.id}. This is its dedicated execution session. Your workspace is ${this.workspace(plan.id)}. ${consumed ? 'Recover unfinished work from the saved proposals, evaluations and human answers.' : 'Continue from training loop step 3.'} Read trainer_plan_read first. Reuse this plan and its proposals. Human plan review and preparation are recorded below. Source-session proposals still require their own approval. Use native tools in this workspace and delegate implementation here.\nPlan: ${JSON.stringify(plan)}\nHuman requests: ${JSON.stringify(reviews)}\nsource_sessions=${JSON.stringify((plan.sourceSessions ?? []).map(ref => ref.sessionId))}` }] }), id: messageId }
+    if (!agent.inbox.nextTurn.some(pending => pending.id === messageId)) agent.send(message, 'next-turn', false)
+    if (!await this.host.sessions.flush(agent.session)) throw new Error('TRAINER_PERSISTENCE_REQUIRED')
+    agent.inbox.remove(messageId)
+    agent.followup(message)
   }
   /** Public global summaries let every Trainer discover existing work before analysis. */
   async listPlans(status: 'open' | 'completed' = 'open', cursor?: string) {
@@ -111,22 +164,34 @@ export class TrainerService extends Service {
     await this.serial(id, async () => { const plan = await this.read(id); plan.painRefs ??= []; if (plan.painRefs.some(r => r.painId === ref.painId && r.reflectId === ref.reflectId)) return; plan.painRefs.push(ref); await atomicJson(join(this.directory(id), 'plan.json'), plan) })
   }
   onMerged(listener: () => Promise<void>): () => void { this.mergeListeners.add(listener); return () => { this.mergeListeners.delete(listener) } }
-  async currentWorkspace(owner: string): Promise<string> {
-    const names = await readdir(this.root).catch((e: NodeJS.ErrnoException) => { if (e.code !== 'ENOENT') throw e; return [] })
-    const plans = await Promise.all(names.map(id => this.read(id).catch(() => undefined)))
-    const current = plans.filter((p): p is TrainingPlan => !!p && p.sessionId === owner && !!p.baseCommit && !p.merge).sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0]
-    return current ? this.workspace(current.id) : this.projectRoot
-  }
   /** Return actual usage, with incomplete provider accounting explicitly identified. */
   async brief(id: string, agent: Agent): Promise<unknown> {
     const plan = await this.read(id)
-    if (plan.sessionId !== String(agent.id)) return { plan, workspace: null }
-    const events = agent.session.snapshotEvents().slice(plan.startSeq)
-    const metrics = deriveMetrics(events)
+    if (plan.sessionId !== String(agent.id) && plan.executionSessionId !== String(agent.id)) return { plan, workspace: null }
+    const delegated = new Set<string>(plan.executionSessionId ? [plan.executionSessionId] : [])
+    const headers = [...await this.host.sessionPersistence.list(), ...this.host.sessions.list().map(session => session.header)]
+    let count: number
+    do {
+      count = delegated.size
+      for (const header of headers) if (header.parentSession && delegated.has(String(header.parentSession))) delegated.add(String(header.id))
+    } while (delegated.size !== count)
+    const sessionIds = [plan.sessionId, ...delegated]
+    const histories = await Promise.all(sessionIds.map(async (id) => {
+      const live = this.host.sessions.get(SessionId(id))
+      const saved = live ? undefined : await this.host.sessionPersistence.readFrom(SessionId(id), SessionLogOffset(0))
+      const rows = live ? live.snapshotEvents() : saved!.events
+      const inherited = live?.inheritedEventCount ?? saved!.inheritedEventCount
+      return rows.slice(Math.max(id === plan.sessionId ? plan.startSeq : 0, Number(inherited)))
+    }))
+    const metrics = deriveMetrics(histories[0] ?? [])
+    for (const history of histories.slice(1)) {
+      const extra = deriveMetrics(history).tokens
+      for (const key of Object.keys(extra) as Array<keyof typeof extra>) metrics.tokens[key] += extra[key]
+    }
     const tests = (await this.host.agentTests.list()).filter(t => t.planId === id)
     const totals = [metrics.tokens, ...tests.flatMap(t => t.result ? [t.result.metrics.tokens] : [])]
     const totalTokens = totals.reduce((sum, t) => sum + t.uncachedInputTokens + t.cacheReadTokens + t.cacheWriteTokens + t.outputTokens, 0)
-    const known = hasCompleteUsage(events)
+    const known = histories.every(hasCompleteUsage)
     return { plan, workspace: plan.baseCommit ? this.workspace(id) : null, usage: { totalTokens, complete: known && tests.every(t => t.result !== undefined && t.result.attempts.length > 0 && t.result.attempts.every(a => a.usageComplete === true)), trainer: metrics.tokens }, requests: (await this.host.humanRequests.list({ planId: id })).map(r => ({ id: r.id, type: r.type, title: r.title, status: r.status, response: r.response })), evaluations: tests.map(t => ({ id: t.runId, status: t.status, path: t.runRoot })) }
   }
   /** Capture the full review tree using a temporary index, preserving the Agent's index. */
@@ -163,6 +228,7 @@ export class TrainerService extends Service {
         await this.serial(plan.id, async () => { const latest = await this.read(plan.id); if (latest.painRefs) plan.painRefs = latest.painRefs; await atomicJson(join(this.directory(plan.id), 'plan.json'), plan) })
         for (const listener of this.mergeListeners) await listener()
         await this.host.humanRequests.deliverNotice(owner, `training-merged:${plan.id}`, `Training Plan ${plan.title} 已完成，本地提交 ${commit}`, true)
+        if (owner !== plan.sessionId) await this.host.humanRequests.deliverNotice(plan.sessionId, `training-merged:${plan.id}`, `Training Plan ${plan.title} completed in execution session ${owner}, local commit ${commit}.`, true)
         return plan
       }
       if (snapshot.integratedCommit && await this.git(this.projectRoot, ['merge-base', '--is-ancestor', snapshot.integratedCommit, target]).then(() => true, () => false)) return finish(snapshot.integratedCommit)

@@ -29,3 +29,29 @@ pnpm --filter @mozi-forge/trainer-agent test:unit
 ```
 
 Root integration tests exercise shared services and the real Web execution path.
+
+## Standard capabilities and execution sessions
+
+Runtime composes Trainer from the installed Harness `standard` preset and the
+training tools. Trainer supplies its persona; standard tool guidance, planning,
+compaction, skills, goals, web tools, background jobs and delegation remain part
+of the assembled prompt and tool catalog. Host providers and optional capabilities
+follow that Harness installation and its deployment configuration.
+
+`trainer_workspace_prepare` returns `executionSessionId` and `handoff`. An analysis
+session receives `handoff: true` and ends its turn. The Host persists and starts
+one dedicated Trainer session with the prepared worktree as its immutable cwd.
+When the Host provides a workspace registry, the worktree is registered as
+`Training: <plan title>` for discovery in the Web workspace list.
+That session continues the existing Plan at proposal creation, using native tools
+and child agents in the worktree. Repeated preparation returns the same identity;
+after Host recovery it resumes the saved session and preserves files and reviews.
+A pending human review keeps execution waiting for its answer.
+
+The Plan retains its analysis `sessionId` and records `executionSessionId`.
+Both identities can access the Plan; other sessions can read its public summary.
+Human requests belong to their submitting session. `trainer_plan_read` exposes
+Plan review answers across the two sessions, and usage includes both sessions, execution descendants and
+associated evaluations. Fork-inherited history is counted in its original session. Successful integration notifies the execution caller and
+the original analysis session. Session cwd and main-checkout files retain their
+normal Harness meanings throughout the handoff.

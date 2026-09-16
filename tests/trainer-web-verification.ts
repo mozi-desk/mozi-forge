@@ -7,8 +7,9 @@
  * Human answers are explicitly test fixtures. Logs/receipts are retained as evidence;
  * credentials are handled only by the provider and startup exchange in memory.
  */
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, writeFile, realpath } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { expect } from 'vitest'
 import { trainerWebFixture } from './trainer-web-fixture.js'
 export async function verifyTraining(mock = false): Promise<void> {
@@ -39,15 +40,21 @@ export async function verifyTraining(mock = false): Promise<void> {
     await writeFile(join(evidence,'fixture.json'),JSON.stringify({root:f.root,sessionId}))
     const deadline=Date.now()+(mock ? 3 : 12)*60*1000
     let completed: unknown
+    const trainingSessions = new Set([String(sessionId)])
     while(Date.now()<deadline){
-      const history = await f.api.sessions.history({ sessionId, maxMessages: 100 })
+      for (const id of await readdir(join(f.home, 'trainning')).catch(() => [])) {
+        const plan = JSON.parse(await readFile(join(f.home, 'trainning', id, 'plan.json'), 'utf8'))
+        if (plan.executionSessionId) trainingSessions.add(plan.executionSessionId)
+      }
+      const histories = await Promise.all([...trainingSessions].map(id => f.api.sessions.history({ sessionId: SessionId(id), maxMessages: 100 })))
+      const history = { result: { value: { events: histories.flatMap(h => h.result.value.events) } } }
       const failure = history.result.value.events.map(row => row.event).find(event => (event.type === 'turn/end' && event.data.reason.kind === 'error') || (mock && event.type === 'tool/result' && (event.data.error !== undefined || JSON.stringify(event.data.message).includes('"isError":true'))))
       if (failure) {
         await writeFile(join(evidence, 'failure.json'), JSON.stringify(failure, null, 2))
         throw new Error(JSON.stringify(failure.data))
       }
       for(const request of await f.requests()){
-        if(request.sessionId!==String(sessionId))continue
+        if(!trainingSessions.has(request.sessionId))continue
         const revise = mock && request.type === 'proposal-review' && !decisions.some(d => d.type === 'proposal-review')
         if (revise) {
           const planDirs = await readdir(join(f.home,'trainning'))
@@ -74,6 +81,18 @@ export async function verifyTraining(mock = false): Promise<void> {
     }
     await writeFile(join(evidence,'evidence.json'),JSON.stringify({fixture:f.root,completed,decisions,results},null,2))
     expect(completed).toBeTruthy()
+    const executionId = (completed as { executionSessionId: string }).executionSessionId
+    expect(executionId).toBeTruthy()
+    const executionHistory = (await f.api.sessions.history({sessionId:SessionId(executionId),maxMessages:100})).result.value.events.map(row=>row.event)
+    if (mock) {
+      const executionText = JSON.stringify(executionHistory)
+      expect(executionText).toContain('FORGE_HEAD_INSTRUCTIONS')
+      expect(executionText).toContain('FORGE_HEAD_SKILL')
+      const planId = (completed as {id:string}).id
+      const workspace = join(f.home, 'trainning', planId, 'workspace')
+      expect(await readFile(join(workspace, 'native-probe.txt'), 'utf8')).toBe('native workspace probe')
+      expect(await realpath((await readFile(join(workspace, 'delegated-workspace.txt'), 'utf8')).trim())).toBe(await realpath(workspace))
+    }
     expect((completed as {sourceSessions: Array<{sessionId:string}>}).sourceSessions.map(ref=>ref.sessionId).sort()).toEqual([...sourceIds].sort())
     expect(decisions.filter(d=>d.type==='proposal-review').length).toBeGreaterThanOrEqual(mock ? 2 : 1)
     expect(proposals.length).toBeGreaterThanOrEqual(mock ? 2 : 1)

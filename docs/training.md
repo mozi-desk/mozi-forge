@@ -18,8 +18,10 @@ can set tool-call budgets, cancellation timeouts, repeats and review requirement
 1. Use an agent and identify sessions or feedback that demonstrate a concrete issue.
 2. Select Trainer and ask for an improvement plan tied to that evidence.
 3. Review the plan and each proposal through Human Request.
-4. Trainer prepares a Git worktree at the selected repository's HEAD, evaluates a
-   baseline, edits the target and evaluates the same suite again.
+4. Trainer prepares a Git worktree at the selected repository's HEAD and returns
+   an execution session ID. Continue training in that session: its native file,
+   shell, skill and delegation tools use the worktree. It evaluates a baseline,
+   edits the target and evaluates the same suite again.
 5. Inspect the result Markdown and evaluation artifacts before approving integration.
 
 A worktree starts from committed HEAD. Uncommitted main-checkout edits are not its
@@ -31,7 +33,9 @@ preserves unrelated destination changes.
 
 `pnpm exec vitest run tests/trainer.web.test.ts` exercises two source sessions,
 plan and proposal reviews, baseline failure, prompt improvement, passing evaluation,
-and reviewed integration. It uses scripted model transport with real Web RPC,
+and reviewed integration across analysis and execution sessions. It also checks
+standard tool availability, worktree instructions and Skills, native file tools,
+and a delegated agent's working directory. It uses scripted model transport with real Web RPC,
 subprocesses and a disposable Git repository. It does not prove live-model quality.
 
 Evaluation state is written under `$DSH_HOME/agent-tests`; plan-associated evidence

@@ -7,6 +7,7 @@
  */
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
 class Adapter extends LlmAdapter {
+  constructor(host) { super(); this.host = host }
   step = 0
   resolveModel(provider, id) { return Promise.resolve({provider,id,name:id}) }
   async *stream(options) {
@@ -16,9 +17,20 @@ class Adapter extends LlmAdapter {
     const values = texts.flatMap(t=>{try{return [JSON.parse(t)]}catch{return []}})
     const last = (predicate) => values.findLast(predicate)
     let name, args, text
-    if (!options.tools?.some(t=>t.name==='trainer_plan_save')) {
+    if (options.tools?.some(t=>t.name==='trainer_plan_save')) {
+      const names = new Set(options.tools.map(tool => tool.name))
+      for (const required of ['read','write','edit','glob','grep','bash','job_output','skill','create_goal','get_goal','update_goal','todo_write','ask_user_question','exit_plan_mode','subagent','subagent_fork','workflow','ralph','web_search','web_fetch']) {
+        if (!names.has(required)) throw new Error(`Trainer standard capability missing: ${required}`)
+      }
+    }
+    if (texts.some(t => t.includes('FORGE_WORKSPACE_PROBE'))) {
+      if (!options.messages.some(m => m.content.some(b => b.type === 'tool-result'))) { name='bash'; args={command:'pwd > delegated-workspace.txt'} }
+      else text='Delegated workspace probe complete.'
+    } else if (!options.tools?.some(t=>t.name==='trainer_plan_save')) {
       if (!options.messages.some(m => m.content.some(b => b.type === 'tool-result'))) { name='bash'; args={description:'Write synthetic result',command:`printf '%s' '${JSON.stringify({answer:(options.system ?? '').includes('{"answer":"OK"}') ? 'OK':'OLD'})}' > result.json`} }
       else text='Saved result.'
+    } else if (last(v => v?.handoff === true && v?.executionSessionId)) {
+      text = 'Training continues in the dedicated execution session.'
     } else {
       const planId=last(v=>v?.id?.startsWith('plan-'))?.id ?? this.planId
       if(planId)this.planId=planId
@@ -26,10 +38,13 @@ class Adapter extends LlmAdapter {
       const requestId=last(v=>v?.type==='training-merge')?.id
       const sourceIds = texts.join('\n').match(/source_sessions=(\[[^\n]+\])/)?.[1]
       const sources = sourceIds ? JSON.parse(sourceIds) : []
+      const inherited = texts.join('\n').match(/Plan: (\{[^\n]+\})/)?.[1]
+      const inheritedPlan = inherited ? JSON.parse(inherited) : undefined
+      if (inheritedPlan?.executionSessionId && !this.host.get('workspaceRegistry')?.list().some(workspace => workspace.sessionIds.includes(inheritedPlan.executionSessionId))) throw new Error('Training execution is missing from the public workspace registry')
       const snapshots = sources.map(id => last(v => v?.sessionId === id && typeof v?.evidencePath === 'string')).filter(Boolean)
       const ref = snapshots.at(-1)
       const sourceSessions = snapshots.map(v => ({sessionId:v.sessionId,revision:v.revision}))
-      const evidence = snapshots.map(v => `session:${v.sessionId}@${v.revision}#0-${v.through}`).join(', ')
+      const evidence = snapshots.length ? snapshots.map(v => `session:${v.sessionId}@${v.revision}#0-${v.through}`).join(', ') : (inheritedPlan?.sourceSessions ?? []).map(v => `session:${v.sessionId}@${v.revision}`).join(', ')
       const firstProposal = `# Proposal 001\nEvidence: ${evidence}. The target writes OLD. Change the target prompt to OK. Compare unchanged fixture-target baseline and after. Risk: fixed output fixture only. Human acceptance: answer is OK.`
       const secondProposal = `# Proposal 002\nEvidence: ${evidence}. Preserve JSON validity with an explicit JSON-output instruction and a second regression case. Baseline and after use the same added suite. Risk: prompt-only wording. Human acceptance: valid JSON and answer OK.`
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
@@ -45,6 +60,12 @@ class Adapter extends LlmAdapter {
         ['human_request_submit',{type:'training-plan-review',planId,body:`Review plan and source evidence: ${evidence}`}],
         [null,'Waiting for plan review.'],
         ['trainer_workspace_prepare',{plan_id:planId}],
+        ['write',{file_path:'native-probe.txt',content:'native workspace probe'}],
+        ['read',{file_path:'native-probe.txt'}],
+        ['glob',{pattern:'native-probe.txt'}],
+        ['skill',{name:'worktree-probe'}],
+        ['subagent',{description:'Verify inherited training workspace',prompt:'FORGE_WORKSPACE_PROBE: record your current working directory.',run_in_background:false}],
+        ['trainer_plan_read',{plan_id:planId}],
         ['bash',{command:'pnpm_config_verify_deps_before_run=false pnpm run build:trainer',timeoutMs:300000}],
         ['bash',{command:commandWrite('../proposals/001.md',firstProposal)}],
         ['human_request_submit',{type:'proposal-review',planId,body:firstProposal}],
@@ -86,6 +107,7 @@ class Adapter extends LlmAdapter {
       else if (next[0]) {name=next[0];args=next[1]}
       else text=next[1]
     }
+    if(name === 'bash') args = {description:'Execute training fixture command', ...args}
     if(name) {
       const id=ToolCallId(crypto.randomUUID())
       yield {type:'block-start',index:0,blockType:'tool-call'}
@@ -103,4 +125,4 @@ class Adapter extends LlmAdapter {
   }
 }
 export const inject=['llm']
-export function apply(ctx){ctx.llm.registerAdapter(['trainer-fixture'],new Adapter())}
+export function apply(ctx){ctx.llm.registerAdapter(['trainer-fixture'],new Adapter(ctx))}

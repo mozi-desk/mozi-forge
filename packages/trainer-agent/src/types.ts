@@ -2,6 +2,8 @@
 export interface TrainingPlan {
   id: string
   sessionId: string
+  /** Dedicated execution session whose immutable cwd is this plan's worktree. */
+  executionSessionId?: string
   sourceSessions?: Array<{ sessionId: string; revision: string }>
   title: string
   description: string

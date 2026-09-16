@@ -27,8 +27,8 @@ export interface RuntimeOptions {
   packages?: string[]
 }
 /** Copy defaults, overlay caller presets, then resolve entries from the caller's dependencies.
- * Package names in ordinary YAML rows remain package names; runtime links make them
- * resolvable by the Loader. Missing optional preset directories are accepted.
+ * Caller-authored YAML keeps its package names; runtime links make them resolvable
+ * by the Loader. Standard preset plugins resolve from the installed Harness. Missing optional preset directories are accepted.
  */
 export async function prepareRuntime(options: RuntimeOptions): Promise<void> {
   const configured = JSON.parse(await readFile(join(options.projectRoot, 'config/runtime.json'), 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; return '{}' })) as Pick<RuntimeOptions, 'pluginExports' | 'packages'>
@@ -37,6 +37,19 @@ export async function prepareRuntime(options: RuntimeOptions): Promise<void> {
   const require = createRequire(join(resolve(options.projectRoot), 'package.json'))
   await rm(target, { recursive: true, force: true })
   await cp(presetDirectory, target, { recursive: true })
+  // Use the caller's installed Harness release as the capability source. Keep
+  // its adjacent assets and resolve its plugins from that same installation.
+  const harness = createRequire(require.resolve('@deepseek-ai/dsh/package.json'))
+  const standardRoot = join(dirname(harness.resolve('@deepseek-ai/dsh-agent-presets/package.json')), 'presets/standard')
+  const standardTarget = join(target, 'trainer/standard')
+  await cp(standardRoot, standardTarget, { recursive: true })
+  const standardFile = join(standardTarget, 'agent.cordis.yml')
+  let standard = await readFile(standardFile, 'utf8')
+  const persona = /^- id: persona\r?\n[\s\S]*?(?=^- id: |$(?![\s\S]))/mu
+  if (!persona.test(standard)) throw new Error('Harness standard preset must declare its persona row')
+  standard = standard.replace(persona, '')
+  standard = standard.replace(/^(\s*name: )['"](@deepseek-ai\/[^'"]+)['"]\s*$/gmu, (_match, prefix: string, specifier: string) => prefix + JSON.stringify(harness.resolve(specifier)))
+  await writeFile(standardFile, standard)
   if (options.presetDirectory) await cp(options.presetDirectory, target, { recursive: true }).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error })
   const replacements = { ...pluginExports, ...options.pluginExports }
   async function rewrite(directory: string): Promise<void> {
