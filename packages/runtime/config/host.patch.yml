@@ -1,0 +1,51 @@
+# Host-plane test orchestration. It registers /agent-test for humans; the
+# model-facing agent_test tool is mounted only by the dedicated tester preset.
+- insert:
+    - id: human-request-host
+      name: '@mozi-forge/human-request-plugin'
+      config:
+        projectRoot: !!js process.cwd()
+
+- insert:
+    - id: agent-test-host
+      # Use the package root so DSH also discovers its browser client bundle.
+      name: '@mozi-forge/agent-test-plugin'
+      config:
+        defaultSuite: coding-live
+        projectRoot: !!js process.cwd()
+        suiteDirectory: !!js process.env.FORGE_AGENT_TEST_SUITE_DIRECTORY
+        evaluationPatch: !!js process.env.FORGE_AGENT_TEST_EVALUATION_PATCH
+
+- insert:
+    - id: trainer-host
+      name: '@mozi-forge/trainer-agent'
+      config:
+        projectRoot: !!js process.cwd()
+
+
+- insert:
+    - id: session-insights
+      name: '@mozi-forge/session-insights-plugin'
+      config:
+        projectRoot: !!js process.cwd()
+    - id: review-agent-host
+      disabled: true
+      name: '@mozi-forge/review-agent'
+      config:
+        projectRoot: !!js process.cwd()
+
+- insert:
+    - id: sleep-loop-host
+      name: '@mozi-forge/sleep-loop-plugin/host'
+      config:
+        projectRoot: !!js process.cwd()
+
+- insert:
+    - id: agent-pain-host
+      name: '@mozi-forge/agent-pain-plugin/host'
+      config:
+        projectRoot: !!js process.cwd()
+    - id: reflect-loop-host
+      name: '@mozi-forge/reflect-loop-plugin/host'
+      config:
+        projectRoot: !!js process.cwd()

@@ -1,0 +1,39 @@
+{
+  "name": "@mozi-forge/runtime",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Preset and runtime composition for self-evolving agents.",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json",
+    "./presets/*": "./config/presets/*",
+    "./host.patch.yml": "./config/host.patch.yml"
+  },
+  "files": [
+    "dist",
+    "config",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint src tests",
+    "test:unit": "vitest run tests"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "oxlint": "^1.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mozi-desk/mozi-forge.git",
+    "directory": "packages/runtime"
+  }
+}

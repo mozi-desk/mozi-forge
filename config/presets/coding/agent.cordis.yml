@@ -1,0 +1,3 @@
+# A coding agent uses the host's local shell.
+- id: coding-bash
+  name: '@deepseek-ai/dsh-tool-bash'

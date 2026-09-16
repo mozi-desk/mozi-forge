@@ -1,0 +1,29 @@
+version: 1
+id: coding-live
+name: Coding smoke evaluation
+preset: coding
+cases:
+  - id: incremental-patch
+    name: Implement and revise a function
+    turns:
+      - id: create
+        prompt: Create sum.mjs exporting a function sum(a, b) that returns a + b. Run it with Node and write result.json containing {"actual":5} from sum(2, 3).
+        expect:
+          turn: { reason: completed }
+          files:
+            - path: result.json
+              json: [{ pointer: /actual, equals: 5 }]
+      - id: update
+        prompt: Update sum so omitted arguments default to zero. Run Node and write result.json containing {"actual":0} from sum().
+        expect:
+          turn: { reason: completed }
+          files:
+            - path: result.json
+              json: [{ pointer: /actual, equals: 0 }]
+    review:
+      required: true
+      title: Review the implementation
+      instructions: Inspect the function and the execution evidence.
+      checklist: [Correct addition, Default arguments work]
+      artifacts:
+        - { label: Source, path: workspace/sum.mjs }

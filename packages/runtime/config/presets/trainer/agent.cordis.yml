@@ -1,0 +1,7 @@
+# Trainer tools use the shared local Harness shell and Agent Test executor.
+- id: trainer-agent
+  name: __FORGE_TRAINER_PLUGIN__
+- id: agent-test-tool
+  name: __FORGE_AGENT_TEST_TOOL_PLUGIN__
+- id: sleep-loop-tools
+  name: __FORGE_SLEEP_LOOP_TOOLS__

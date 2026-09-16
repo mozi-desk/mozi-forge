@@ -1,0 +1,59 @@
+{
+  "name": "@mozi-forge/session-insights-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/host.js",
+    "./host": "./dist/host.js",
+    "./types": "./dist/types.js",
+    "./package.json": "./package.json",
+    "./metrics": "./dist/metrics.js",
+    "./store": "./dist/store.js",
+    "./inspection": "./dist/inspection.js",
+    "./contracts": "./dist/contracts.js",
+    "./event-analysis": "./dist/event-analysis.js",
+    "./budgets": "./dist/budgets.js",
+    "./incremental": "./dist/incremental.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint src tests",
+    "test:unit": "vitest run tests"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-agent": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-commands": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
+    "@deepseek-ai/schemastery": "3.18.2",
+    "@deepseek-ai/dsh-util-values": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-presets": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-connection": "0.1.2-rc.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "oxlint": "^1.12.0"
+  },
+  "license": "Apache-2.0",
+  "files": [
+    "dist",
+    "prompts",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mozi-desk/mozi-forge.git",
+    "directory": "packages/session-insights-plugin"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

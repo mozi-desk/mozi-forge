@@ -1,0 +1,47 @@
+# Coding agent overlay. A patch replaces a row's complete config.
+
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash
+
+# The deterministic fallback already produces a useful title without another
+# model request on every new session.
+- id: session-title-llm
+  name: '@deepseek-ai/dsh-session-title-first-prompt-llm'
+  disabled: true
+  config:
+    targetWords: 5
+    targetCjkCharacters: 10
+    maxInputBytes: 4096
+    maxOutputTokens: 64
+    timeoutMs: 60000
+
+# The coding agent deliberately uses the unconfined local shell provider.
+- id: bash-sandbox
+  name: '@deepseek-ai/dsh-bash-sandbox'
+  disabled: true
+  config:
+    timeoutMs: 60000
+
+# No approval or permission-preset layer is composed over the unconfined shell.
+- id: approval
+  name: '@deepseek-ai/dsh-user-approval'
+  disabled: true
+
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  disabled: true
+
+- insert:
+    - id: bash-local
+      name: '@deepseek-ai/dsh-bash-local'
+      config:
+        timeoutMs: 60000
+
+- id: agent-presets
+  name: '@deepseek-ai/dsh-agent-presets'
+  config:
+    default: coding
+    includeUserRoot: true
