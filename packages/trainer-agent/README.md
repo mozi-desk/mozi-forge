@@ -30,6 +30,19 @@ pnpm --filter @mozi-forge/trainer-agent test:unit
 
 Root integration tests exercise shared services and the real Web execution path.
 
+## Reporting to the human
+
+The persona opens with a reporting contract for a non-technical owner: every
+human-facing message leads with what will change for them and what they must
+choose, each decision offers two or three concrete options with one marked as
+recommended, the decision list is never built from internal identifiers or
+infrastructure terms, and the owner is never asked to read or approve an internal
+document. Mechanical internals stay with Trainer; implementation detail appears
+only when the owner asks for it.
+
+`tests/trainer-prompt.test.ts` asserts the contract in the prompt the real Loader
+composes for a Trainer turn, so the wording cannot disappear silently.
+
 ## Standard capabilities and execution sessions
 
 Runtime composes Trainer from the installed Harness `standard` preset and the

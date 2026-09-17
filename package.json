@@ -16,7 +16,7 @@
     "start": "pnpm run build && node dist/start.js",
     "check:pack": "node scripts/check-pack.mjs",
     "build:trainer": "pnpm -r run build",
-    "test:integration": "vitest run tests/trainer.integration.test.ts tests/pain.integration.test.ts tests/trainer.web.test.ts"
+    "test:integration": "vitest run tests/trainer.integration.test.ts tests/trainer-prompt.test.ts tests/pain.integration.test.ts tests/trainer.web.test.ts"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.5-rc.2",
