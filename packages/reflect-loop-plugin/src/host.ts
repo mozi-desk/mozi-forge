@@ -6,7 +6,8 @@
  */
 import { join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { type SessionPersistence, listStoredSessions } from '@mozi-forge/session-insights-plugin/session-reader'
 import { MessageId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -94,20 +95,8 @@ export class ReflectService extends Service {
       const requests = await this.host.humanRequests.list({ sessionId: r.trainer.sessionId })
       if (requests.some((q) => q.status === 'pending')) return
     }
-    const persistence = this.host.get('sessionPersistence') as unknown as {
-      list(): Promise<
-        Array<{
-          id: string
-        }>
-      >
-      readFrom(
-        id: SessionId,
-        offset: SessionLogOffset,
-      ): Promise<{
-        events: readonly SessionEvent[]
-      }>
-    }
-    const exists = (await persistence.list()).some((s) => String(s.id) === String(id))
+    const persistence = this.host.get('sessionPersistence') as unknown as SessionPersistence
+    const exists = (await listStoredSessions(persistence)).some((s) => String(s.id) === String(id))
     if (!agent) {
       const setup = async (ctx: Context) => {
         await this.host.agentPresets.mount(ctx, 'trainer')

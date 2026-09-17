@@ -21,7 +21,6 @@ import SleepService from '@mozi-forge/sleep-loop-plugin/host'
 import AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
@@ -60,8 +59,10 @@ export async function fixture(adapter?: LlmAdapter) {
   try {
   ctx.baseUrl = new URL('../', import.meta.url).href
   await ctx.plugin(Loader); ctx.loader.builtins.include = Include
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
-  await ctx.plugin(SessionProjectionRegistry); await ctx.plugin(AgentLoop, { agents: [] })
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
+  // Harness 0.1.5 mounts SessionProjectionRegistry inside mountAgentLoopTestDependencies, so mounting it
+  // here again would register the same service twice and fail.
+  await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(LocalFileSystem); await ctx.plugin(LocalSubprocessRuntime); await ctx.plugin(ShellEnv, { dshHome: home }); await ctx.plugin(LocalBashExecutor, { timeoutMs: 10000 }); await ctx.plugin(LocalJobRegistry, {})
   await ctx.plugin(Commands); await ctx.plugin(HostConnectionService, [])
   await ctx.plugin(JsonlPersistence, { root: join(home, 'sessions') })

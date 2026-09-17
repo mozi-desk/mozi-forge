@@ -63,7 +63,9 @@ it('catches up once after multi-day downtime and advances the deadline from that
   expect(f.delivered[0]!.prompt).toContain('20 minutes')
   expect(f.delivered[0]!.prompt).toContain('Before deep analysis')
 })
-it('filters thousands of unchanged IDs from records and context and reads only later dirty candidates', async () => {
+// This scenario is deliberately large: it drives 2000 unchanged session ids through two polls, which
+// takes roughly half a minute on this machine, so it needs an explicit budget beyond the suite default.
+it('filters thousands of unchanged IDs from records and context and reads only later dirty candidates', { timeout: 120_000 }, async () => {
   const ids = Array.from({ length: 2000 }, (_, i) => `quiet-${i}`), f = await fixture(ids)
   f.changed.clear()
   await f.engine.schedule({ delta_ms: 1 }); f.clock.advance(1); await f.engine.poll(); await f.engine.drain()

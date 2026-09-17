@@ -12,6 +12,21 @@ import { join, resolve } from 'node:path'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { expect } from 'vitest'
 import { trainerWebFixture } from './trainer-web-fixture.js'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionWireEvent } from '@deepseek-ai/dsh-api-session-controller/types'
+/**
+ * Durable session events from one history page.
+ *
+ * Harness 0.1.5 removed the storage decoder that used to narrow journal records into `SessionEvent`, so
+ * the session controller now types each record as the deliberately loose `SessionWireEvent` envelope:
+ * `type` stays a plain string and `data` stays JSON, because durable readers own recognition of
+ * merge-extensible event names. This verification script reads its own child's durable log, so it
+ * narrows once here and every reader below works against the discriminated union.
+ */
+function sessionEvents(page: { result: { value: { events: readonly { event: SessionWireEvent }[] } } }): SessionEvent[] {
+  return page.result.value.events.map(row => row.event) as unknown as SessionEvent[]
+}
+
 export async function verifyTraining(mock = false): Promise<void> {
   const evidence = resolve('.runtime/trainer-validation', new Date().toISOString().replaceAll(/[:.]/g,'-'))
   await mkdir(evidence,{recursive:true})
@@ -28,8 +43,8 @@ export async function verifyTraining(mock = false): Promise<void> {
       const deadline = Date.now() + 120000
       let ended = false
       while (Date.now() < deadline) {
-        const events = (await f.api.sessions.history({sessionId:source,maxMessages:100})).result.value.events
-        if (events.some(row => row.event.type === 'turn/end')) { ended = true; break }
+        const events = sessionEvents(await f.api.sessions.history({sessionId:source,maxMessages:100}))
+        if (events.some(event => event.type === 'turn/end')) { ended = true; break }
         await new Promise(done => setTimeout(done, 200))
       }
       expect(ended).toBe(true)
@@ -48,7 +63,7 @@ export async function verifyTraining(mock = false): Promise<void> {
       }
       const histories = await Promise.all([...trainingSessions].map(id => f.api.sessions.history({ sessionId: SessionId(id), maxMessages: 100 })))
       const history = { result: { value: { events: histories.flatMap(h => h.result.value.events) } } }
-      const failure = history.result.value.events.map(row => row.event).find(event => (event.type === 'turn/end' && event.data.reason.kind === 'error') || (mock && event.type === 'tool/result' && (event.data.error !== undefined || JSON.stringify(event.data.message).includes('"isError":true'))))
+      const failure = sessionEvents(history).find(event => (event.type === 'turn/end' && event.data.reason.kind === 'error') || (mock && event.type === 'tool/result' && (event.data.error !== undefined || JSON.stringify(event.data.message).includes('"isError":true'))))
       if (failure) {
         await writeFile(join(evidence, 'failure.json'), JSON.stringify(failure, null, 2))
         throw new Error(JSON.stringify(failure.data))
@@ -83,7 +98,7 @@ export async function verifyTraining(mock = false): Promise<void> {
     expect(completed).toBeTruthy()
     const executionId = (completed as { executionSessionId: string }).executionSessionId
     expect(executionId).toBeTruthy()
-    const executionHistory = (await f.api.sessions.history({sessionId:SessionId(executionId),maxMessages:100})).result.value.events.map(row=>row.event)
+    const executionHistory = sessionEvents(await f.api.sessions.history({ sessionId: SessionId(executionId), maxMessages: 100 }))
     if (mock) {
       const executionText = JSON.stringify(executionHistory)
       expect(executionText).toContain('FORGE_HEAD_INSTRUCTIONS')
@@ -97,7 +112,7 @@ export async function verifyTraining(mock = false): Promise<void> {
     expect(decisions.filter(d=>d.type==='proposal-review').length).toBeGreaterThanOrEqual(mock ? 2 : 1)
     expect(proposals.length).toBeGreaterThanOrEqual(mock ? 2 : 1)
     if (mock) { expect(decisions.filter(d=>d.type==='proposal-review')).toHaveLength(3); expect(proposals.join('\n')).toContain('Revision:') }
-    const history = (await f.api.sessions.history({sessionId,maxMessages:100})).result.value.events.map(r=>r.event)
+    const history = sessionEvents(await f.api.sessions.history({ sessionId, maxMessages: 100 }))
     const calls = history.filter(e=>e.type==='tool/call').map(e=>e.data.name)
     expect(calls.indexOf('session_inspect')).toBeLessThan(calls.indexOf('trainer_plan_save'))
     expect(calls).toContain('session_query'); expect(calls).toContain('session_read')

@@ -1,9 +1,12 @@
 /**
  * Purpose: Compute session timings, usage and tool outcomes from public events.
- * Example: a usage chunk followed by final usage for the same turn/step counts once;
- * a text-only error hint stays outside confirmed failures. Missing calls count as
- * incomplete separately from failed; aggregate failureRate includes both outcomes.
+ * Example: Harness 0.1.5 settles `assistant/message` once per turn/step and embeds the attempt's timed
+ * stream in it, so the first-token time for TTFT comes from `assistantStreamFirstTokenTime` over that
+ * stream and the settlement's `usage` is counted once even when the same step also produced earlier
+ * `assistant/attempt` records; a text-only error hint stays outside confirmed failures. Missing calls
+ * count as incomplete separately from failed; aggregate failureRate includes both outcomes.
  */
+import { assistantStreamFirstTokenTime } from '@deepseek-ai/dsh-llm'
 import { toolResultState } from './event-analysis.js'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionMetrics, Distribution, TokenTotals } from './metrics-types.js'
@@ -19,9 +22,9 @@ function nonnegative(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
 }
 
+/** Token accounting for one settled step. Harness 0.1.5 reports usage only on the settlement event. */
 export function usageOf(event: SessionEvent): Usage | undefined {
   if (event.type === 'assistant/message') return event.data.usage
-  if (event.type === 'assistant/chunk' && event.data.chunk.type === 'usage') return event.data.chunk.usage
   return undefined
 }
 
@@ -58,22 +61,19 @@ export function deriveMetrics(events: readonly SessionEvent[]): SessionMetrics {
   for (const event of events) {
     if (event.type === 'step/start') {
       steps.set(`${String(event.data.turn)}:${String(event.data.step)}`, { start: event.time })
-    } else if (event.type === 'assistant/chunk') {
-      const key = `${String(event.data.turn)}:${String(event.data.step)}`
-      const step = steps.get(key)
-      if (step !== undefined && step.firstToken === undefined) {
-        const chunk = event.data.chunk
-        if (((chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') && chunk.text.length > 0)
-          || (chunk.type === 'tool-call-delta' && (chunk.argumentsDelta.length > 0 || chunk.name !== undefined))) {
-          step.firstToken = event.time
-        }
-      }
-      const usage = usageOf(event)
-      if (usage !== undefined) usages.set(key, usage)
     } else if (event.type === 'assistant/message') {
       const key = `${String(event.data.turn)}:${String(event.data.step)}`
       const step = steps.get(key)
-      if (step !== undefined) step.message = event.time
+      if (step !== undefined) {
+        step.message = event.time
+        // Harness 0.1.5 removed the per-chunk session events that used to supply the first-token time,
+        // and embeds the attempt's timed stream in the settlement event instead. The reader reconstructs
+        // the same first delta time, keeping TTFT measurable rather than silently dropping it.
+        if (step.firstToken === undefined) {
+          const firstToken = assistantStreamFirstTokenTime(event.data.stream)
+          if (firstToken !== undefined) step.firstToken = firstToken
+        }
+      }
       const usage = usageOf(event)
       if (usage !== undefined) usages.set(key, usage)
     } else if (event.type === 'step/end') {

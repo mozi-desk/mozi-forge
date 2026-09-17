@@ -20,7 +20,7 @@ import { join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { MessageId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -125,7 +125,8 @@ export class TrainerService extends Service {
     let agent = this.host.agents.get(id)
     let resumed = false
     if (!agent) {
-      const exists = (await this.host.sessionPersistence.list()).some(row => row.id === id)
+      // Harness 0.1.5 wraps each stored session's identity in `header`, so the id moves one level down.
+      const exists = (await this.host.sessionPersistence.list()).some(row => row.header.id === id)
       resumed = exists
       const setup = async (ctx: Context) => { await this.host.agentPresets.mount(ctx, 'trainer') }
       const agentOptions = this.host.agentDefaultModel.currentSelection()
@@ -169,7 +170,7 @@ export class TrainerService extends Service {
     const plan = await this.read(id)
     if (plan.sessionId !== String(agent.id) && plan.executionSessionId !== String(agent.id)) return { plan, workspace: null }
     const delegated = new Set<string>(plan.executionSessionId ? [plan.executionSessionId] : [])
-    const headers = [...await this.host.sessionPersistence.list(), ...this.host.sessions.list().map(session => session.header)]
+    const headers = [...(await this.host.sessionPersistence.list()).map(row => row.header), ...this.host.sessions.list().map(session => session.header)]
     let count: number
     do {
       count = delegated.size
@@ -177,11 +178,20 @@ export class TrainerService extends Service {
     } while (delegated.size !== count)
     const sessionIds = [plan.sessionId, ...delegated]
     const histories = await Promise.all(sessionIds.map(async (id) => {
+      const from = Math.max(id === plan.sessionId ? plan.startSeq : 0, 0)
       const live = this.host.sessions.get(SessionId(id))
-      const saved = live ? undefined : await this.host.sessionPersistence.readFrom(SessionId(id), SessionLogOffset(0))
-      const rows = live ? live.snapshotEvents() : saved!.events
-      const inherited = live?.inheritedEventCount ?? saved!.inheritedEventCount
-      return rows.slice(Math.max(id === plan.sessionId ? plan.startSeq : 0, Number(inherited)))
+      // Harness 0.1.5 replaced the direct `readFrom` call with a per-session storage handle. A `read`
+      // handle observes the log without taking write ownership (so it still works while the owning
+      // process holds `write`), and its `inheritedEventCount` carries the fork cut that used to arrive
+      // on the read result.
+      if (live) return live.snapshotEvents().slice(Math.max(from, Number(live.inheritedEventCount)))
+      const handle = await this.host.sessionPersistence.open(SessionId(id), 'read')
+      try {
+        const { events } = await handle.read(0)
+        return events.slice(Math.max(from, Number(handle.inheritedEventCount)))
+      } finally {
+        await handle.close()
+      }
     }))
     const metrics = deriveMetrics(histories[0] ?? [])
     for (const history of histories.slice(1)) {

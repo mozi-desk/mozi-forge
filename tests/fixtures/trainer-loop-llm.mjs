@@ -6,6 +6,19 @@
  * Target sessions obey the snapshot prompt and execute real shell tools.
  */
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
+/**
+ * Effective system prompt of one model request.
+ *
+ * Harness 0.1.5 delivers a loop-built system prompt as the leading system-role message in `messages`
+ * and leaves `options.system` undefined for that request, so reading `system` alone always yields an
+ * empty string. This fixture reads the same text the model would receive.
+ */
+function systemPromptOf(options) {
+  const first = options.messages?.[0]
+  if (first?.role === 'system') return (first.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('')
+  return options.system ?? ''
+}
+
 class Adapter extends LlmAdapter {
   constructor(host) { super(); this.host = host }
   step = 0
@@ -27,7 +40,7 @@ class Adapter extends LlmAdapter {
       if (!options.messages.some(m => m.content.some(b => b.type === 'tool-result'))) { name='bash'; args={command:'pwd > delegated-workspace.txt'} }
       else text='Delegated workspace probe complete.'
     } else if (!options.tools?.some(t=>t.name==='trainer_plan_save')) {
-      if (!options.messages.some(m => m.content.some(b => b.type === 'tool-result'))) { name='bash'; args={description:'Write synthetic result',command:`printf '%s' '${JSON.stringify({answer:(options.system ?? '').includes('{"answer":"OK"}') ? 'OK':'OLD'})}' > result.json`} }
+      if (!options.messages.some(m => m.content.some(b => b.type === 'tool-result'))) { name='bash'; args={description:'Write synthetic result',command:`printf '%s' '${JSON.stringify({answer:systemPromptOf(options).includes('{"answer":"OK"}') ? 'OK':'OLD'})}' > result.json`} }
       else text='Saved result.'
     } else if (last(v => v?.handoff === true && v?.executionSessionId)) {
       text = 'Training continues in the dedicated execution session.'

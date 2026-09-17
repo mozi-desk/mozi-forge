@@ -21,7 +21,7 @@ export function hasCompleteUsage(events: readonly SessionEvent[]): boolean {
   const steps = new Set<string>(), measured = new Set<string>()
   for (const event of events) {
     if (event.type === 'step/start') steps.add(`${event.data.turn}:${event.data.step}`)
-    if ((event.type === 'assistant/message' && event.data.usage !== undefined) || (event.type === 'assistant/chunk' && event.data.chunk.type === 'usage')) measured.add(`${event.data.turn}:${event.data.step}`)
+    if (event.type === 'assistant/message' && event.data.usage !== undefined) measured.add(`${event.data.turn}:${event.data.step}`)
   }
   return steps.size > 0 && [...steps].every(step => measured.has(step))
 }

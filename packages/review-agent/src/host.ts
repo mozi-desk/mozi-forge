@@ -21,6 +21,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { bounded, digest, Records, Serial } from '@mozi-forge/session-insights-plugin/store'
 import { textPage } from '@mozi-forge/session-insights-plugin/inspection'
+import { listStoredSessions, type SessionPersistence } from '@mozi-forge/session-insights-plugin/session-reader'
 import type { ReviewInput, ReviewResult, ReviewRun } from './types.js'
 import { parseReviewResult } from './result.js'
 export const name = 'mozi-review-host'
@@ -54,8 +55,11 @@ export class ReviewService extends Service {
       if (this.host.agents.get(SessionId(run.sessionId)) !== undefined) return run
       const setup = async (ctx: Context): Promise<void> => { await this.host.agentPresets.mount(ctx, 'reviewer') }
       let handle: AgentHandle
-      const persisted = this.host.get('sessionPersistence') as unknown as { list(): Promise<Array<{ id: string }>> } | undefined
-      const exists = (await persisted?.list() ?? []).some(s => String(s.id) === run!.sessionId)
+      // Harness 0.1.5 returns snapshots whose identity lives in `header`, so `listStoredSessions` keeps the
+      // `{ id }` shape this check needs: reading `snapshot.id` would silently never match a stored session
+      // and every review would create a fresh Agent instead of resuming the existing one.
+      const persisted = this.host.get('sessionPersistence') as unknown as SessionPersistence | undefined
+      const exists = (persisted === undefined ? [] : await listStoredSessions(persisted)).some(s => s.id === run!.sessionId)
       if (exists) handle = await this.host.agents.resume({ resumeSessionId: SessionId(run.sessionId), setup, agentOptions: run.agentOptions ?? {} })
       else handle = await this.host.agents.create({ sessionId: SessionId(run.sessionId), meta: { cwd: resolve(this.config.projectRoot), agentPreset: 'reviewer' }, setup, agentOptions: run.agentOptions ?? {} })
       this.handles.set(run.sessionId, handle)

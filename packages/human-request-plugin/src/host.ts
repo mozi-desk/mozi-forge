@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import { registerRpcChannel } from './rpc-channel.js'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -43,7 +44,7 @@ export class HumanRequestService extends Service {
   constructor(private host: Context, config: Config) {
     super(host, 'humanRequests')
     this.root = join(resolve(process.env.DSH_HOME ?? join(config.projectRoot, '.runtime')), 'human-requests')
-    host.inject(['connection', 'webServer'], connectionContext => connectionContext.connection.rpc.handle('/mozi-human-requests', async (endpoint, payload) => {
+    host.inject(['connection', 'webServer'], connectionContext => registerRpcChannel(connectionContext, '/mozi-human-requests', async (endpoint, payload) => {
       try {
         const input = payload as { id: string; body: string } & HumanRequestListInput
         if (endpoint === 'list') return { ok: true, value: await this.list(input) }

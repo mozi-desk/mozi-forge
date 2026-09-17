@@ -13,7 +13,8 @@
  */
 import { join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { type SessionPersistence, listStoredSessions, readStoredSession } from '@mozi-forge/session-insights-plugin/session-reader'
 import { MessageId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -43,8 +44,8 @@ export class SleepService extends Service {
       beginWindow: () => { this.endpoints = new Map(host.sessions.list().map(session => [String(session.id), Number(session.snapshotEvents().at(-1)?.seq ?? -1)])) },
       endWindow: () => { this.endpoints = undefined },
       list: async () => {
-        const persistence = host.get('sessionPersistence') as unknown as { list(): Promise<Array<{ id: string }>> }
-        const ids = (await persistence.list()).map(row => String(row.id))
+        const persistence = host.get('sessionPersistence') as unknown as SessionPersistence
+        const ids = (await listStoredSessions(persistence)).map(row => row.id)
         for (const id of ids) this.persisted.add(id)
         return [...new Set([...ids, ...host.sessions.list().map(s => String(s.id))])]
       },
@@ -85,8 +86,8 @@ export class SleepService extends Service {
     let agent = this.host.agents.get(id)
     if (!agent) {
       if (this.persisted.has(delivery.sessionId)) {
-        const persistence = this.host.get('sessionPersistence') as unknown as { readFrom(id: SessionId, offset: SessionLogOffset): Promise<{ events: readonly SessionEvent[] }> }
-        const saved = await persistence.readFrom(id, SessionLogOffset(0))
+        const persistence = this.host.get('sessionPersistence') as unknown as SessionPersistence
+        const saved = await readStoredSession(persistence, id)
         if (saved.events.some(e => e.type === 'user/message' && String(e.data.id) === delivery.messageId)) return
       }
       const setup = async (ctx: Context): Promise<void> => { await this.host.agentPresets.mount(ctx, 'trainer') }

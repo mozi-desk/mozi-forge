@@ -31,15 +31,25 @@ async function hostFixture(home?: string, failFlush = false, appendDuringFlush =
   const persistedPath = join(root, 'fixture-sessions.json')
   let saved: Record<string, Saved>
   try { saved = JSON.parse(await readFile(persistedPath, 'utf8')) as Record<string, Saved> } catch {
-    saved = { source: { meta: { id: SessionId('source'), version: 1, isSeeded: false, createdAt: Date.now()-100, agentPreset: 'coding' }, events: [{ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }, { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } }] as SessionEvent[] } }
+    saved = { source: { meta: { id: SessionId('source'), version: 3, isSeeded: false, createdAt: Date.now()-100, agentPreset: 'coding' }, events: [{ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }, { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } }] as SessionEvent[] } }
   }
   const live = new Map<string, Saved>(), trace: string[] = [], prompts: UserMessage[] = [], presets: string[] = [], creates: string[] = [], resumes: string[] = []
   if (appendDuringFlush) live.set('source', structuredClone(saved.source!))
   const ctx = new Context(); contexts.push(ctx)
   class Persistence extends Service {
     constructor(ctx: Context) { super(ctx, 'sessionPersistence') }
-    async list() { return Object.values(saved).map(s => s.meta) }
-    async readFrom(id: string) { if (!saved[id]) throw new Error('MISSING_SOURCE'); return structuredClone(saved[id]!) }
+    // Harness 0.1.5 returns snapshots from `list()` and a per-session read handle from `open()`.
+    async list() { return Object.values(saved).map(s => ({ header: s.meta })) }
+    async open(id: string) {
+      if (!saved[id]) throw new Error('MISSING_SOURCE')
+      const stored = structuredClone(saved[id]!)
+      return {
+        header: stored.meta,
+        inheritedEventCount: 0,
+        async read(offset = 0) { return { events: stored.events.filter(event => Number(event.seq) >= offset) } },
+        async close() {},
+      }
+    }
   }
   class Sessions extends Service {
     constructor(ctx: Context) { super(ctx, 'sessions') }
@@ -49,7 +59,7 @@ async function hostFixture(home?: string, failFlush = false, appendDuringFlush =
       trace.push('flush')
       if (failFlush) throw new Error('MOCK_FLUSH_FAILED')
       if (appendDuringFlush && session.id === 'source') {
-        live.get('source')!.events.push({ type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 2 } } as SessionEvent)
+        live.get('source')!.events.push({ type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 2 } } as unknown as SessionEvent)
         appendDuringFlush = false
       }
       saved[session.id] = structuredClone(live.get(session.id)!)
@@ -65,7 +75,7 @@ async function hostFixture(home?: string, failFlush = false, appendDuringFlush =
   class Agents extends Service {
     constructor(ctx: Context) { super(ctx, 'agents') }
     get(id: string) { return agents.get(id) }
-    async create(opts: { agentOptions: AgentOptions; sessionId: string; meta: SessionHeader; setup(ctx: Context): Promise<void> }) { expect(opts.agentOptions).toEqual({ provider: 'sleep-fixture', model: 'configured-model' }); creates.push(opts.sessionId); return this.make(opts.sessionId, { meta: { ...opts.meta, id: SessionId(opts.sessionId), version: 1, isSeeded: false, createdAt: Date.now() }, events: [] }, opts.setup) }
+    async create(opts: { agentOptions: AgentOptions; sessionId: string; meta: SessionHeader; setup(ctx: Context): Promise<void> }) { expect(opts.agentOptions).toEqual({ provider: 'sleep-fixture', model: 'configured-model' }); creates.push(opts.sessionId); return this.make(opts.sessionId, { meta: { ...opts.meta, id: SessionId(opts.sessionId), version: 3, isSeeded: false, createdAt: Date.now() }, events: [] }, opts.setup) }
     async resume(opts: { agentOptions: AgentOptions; resumeSessionId: string; setup(ctx: Context): Promise<void> }) { expect(opts.agentOptions).toEqual({ provider: 'sleep-fixture', model: 'configured-model' }); resumes.push(opts.resumeSessionId); return this.make(opts.resumeSessionId, structuredClone(saved[opts.resumeSessionId]!), opts.setup) }
     async make(id: string, state: Saved, setup: (ctx: Context) => Promise<void>) {
       await setup(ctx)
@@ -73,7 +83,7 @@ async function hostFixture(home?: string, failFlush = false, appendDuringFlush =
       const queued: UserMessage[] = []
       for (const event of state.events) if (event.type === 'agent/inbox/spliced') queued.splice(event.data.start, event.data.removedCount ?? 0, ...event.data.inserted)
       const append = (inserted: UserMessage[], start: number, removedCount = 0) => {
-        state.events.push({ type: 'agent/inbox/spliced', seq: state.events.length, time: Date.now(), data: { target: 'next-turn', start, removedCount, inserted } } as SessionEvent)
+        state.events.push({ type: 'agent/inbox/spliced', seq: state.events.length, time: Date.now(), data: { target: 'next-turn', start, removedCount, inserted } } as unknown as SessionEvent)
         queued.splice(start, removedCount, ...inserted)
       }
       const agent = {
@@ -91,13 +101,13 @@ async function hostFixture(home?: string, failFlush = false, appendDuringFlush =
   await ctx.plugin(SessionInsights, { projectRoot: root })
   if (!home) {
     const now = Date.now()
-    await durableJson(join(root, 'sleeps/scheduler.json'), { version: 1, initializedAt: now-DAY, lastSleepId: null, lastStartedAt: null, requestedAt: null, nextDueAt: now-1, hardDeadlineAt: now, generation: 1 })
+    await durableJson(join(root, 'sleeps/scheduler.json'), { version: 3, initializedAt: now-DAY, lastSleepId: null, lastStartedAt: null, requestedAt: null, nextDueAt: now-1, hardDeadlineAt: now, generation: 1 })
   }
   await ctx.plugin(SleepService, { projectRoot: root }); await ctx.sleepLoop.ready
   const claimInitial = async () => {
     const id = creates[0]!, state = saved[id]!, message = prompts[0]!
-    state.events.push({ type: 'agent/inbox/spliced', seq: state.events.length, time: Date.now(), data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } } as SessionEvent)
-    state.events.push({ type: 'user/message', seq: state.events.length, time: Date.now(), data: message } as SessionEvent)
+    state.events.push({ type: 'agent/inbox/spliced', seq: state.events.length, time: Date.now(), data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } } as unknown as SessionEvent)
+    state.events.push({ type: 'user/message', seq: state.events.length, time: Date.now(), data: message } as unknown as SessionEvent)
     await writeFile(persistedPath, JSON.stringify(saved))
   }
   return { root, ctx, trace, prompts, creates, resumes, presets, claimInitial, setFailFlush(value: boolean) { failFlush = value } }

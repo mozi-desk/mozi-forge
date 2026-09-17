@@ -6,6 +6,8 @@
  * Pain collection stays enabled in every evaluation; reflection is enabled alongside
  * its Trainer host. Example: a Coding evaluation records pain without starting a Trainer.
  * Child runtime, sessions and artifacts are isolated; shutdown joins the owned process.
+ * Final metrics are refreshed from the child's flushed generation log, located by its canonical
+ * `.vN` filename rather than a fixed name.
  */
 import { prepareRuntime } from '@mozi-forge/runtime'
 import { createWorkcopy, workcopyPath, resolvePackageDirectory } from './workcopy.js'
@@ -15,8 +17,9 @@ import { createWriteStream } from 'node:fs'
 import { lstat, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
-import { dirname, join, relative, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
+import { parseSessionFormatLogFilename } from '@deepseek-ai/dsh-session-format'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { evaluateBudgets, evaluateTurn } from './assertions.js'
 import { assertSafeRelativePath } from './definition.js'
@@ -375,7 +378,12 @@ async function waitForTurn(api: HarnessSessionClient, sessionId: SessionId, coun
   while (Date.now() < deadline) {
     if (signal.aborted) throw abortError(signal)
     const history = valueOf(await api.sessions.history({ sessionId, maxMessages: 10_000 }, signal))
-    const events = history.events.map(entry => entry.event)
+    // Harness 0.1.5 removed the storage decoder that used to narrow journal records into
+    // `SessionEvent`, so the controller journal now hands back the deliberately loose
+    // `SessionWireEvent` envelope (its `type` stays a string because durable readers own event-name
+    // recognition). This runner reads the durable log of the Harness it launched and pinned, so it
+    // narrows once here; every downstream reader relies on the discriminated union.
+    const events = history.events.map(entry => entry.event) as unknown as SessionEvent[]
     if (events.filter(event => event.type === 'turn/end').length >= count) return events
     await abortableDelay(200, signal)
   }
@@ -453,19 +461,36 @@ async function runAttempt(
   }
 }
 
+/**
+ * Locate the current flushed log of one session below a sessions root.
+ *
+ * Harness 0.1.5 addresses every stored log by immutable format generation, naming it
+ * `session.vN.jsonl` and keeping the bare `session.jsonl` only for generation zero, so the previous
+ * fixed `session.jsonl` match missed every log this build writes. A session that was migrated on read
+ * leaves its older generations in place next to the new one, so the highest generation whose stored
+ * header names the wanted session wins: that is the generation the child last published. The child's
+ * persistence runs with `compression: none`, so canonical names carry no compression suffix.
+ *
+ * @param root - the child's sessions root.
+ * @param sessionId - the session whose log is wanted.
+ * @returns the winning log path, or undefined when no generation belongs to that session.
+ */
 async function findSessionLog(root: string, sessionId: string): Promise<string | undefined> {
   if (!await exists(root)) return undefined
+  let best: { path: string, generation: number } | undefined
   for (const path of await filesBelow(root)) {
-    if (!path.endsWith(`${sep}session.jsonl`) && !path.endsWith('/session.jsonl')) continue
+    const generation = parseSessionFormatLogFilename(basename(path))
+    if (generation === undefined) continue
+    if (best !== undefined && generation <= best.generation) continue
     const firstLine = (await readFile(path, 'utf8')).split('\n', 1)[0]
     try {
       const header = JSON.parse(firstLine ?? '') as { type?: unknown; id?: unknown }
-      if (header.type === 'session' && header.id === sessionId) return path
+      if (header.type === 'session' && header.id === sessionId) best = { path, generation }
     } catch {
       // A malformed log is reported by the attempt metrics refresh below.
     }
   }
-  return undefined
+  return best?.path
 }
 
 async function readSessionEvents(path: string): Promise<SessionEvent[]> {

@@ -16,13 +16,15 @@ export function usageComplete(events: readonly SessionEvent[]): boolean {
   const steps = new Set<string>(), measured = new Set<string>()
   for (const e of events) {
     if (e.type === 'step/start' || e.type === 'assistant/message') steps.add(`${e.data.turn}:${e.data.step}`)
-    if ((e.type === 'assistant/message' && e.data.usage !== undefined) || (e.type === 'assistant/chunk' && e.data.chunk.type === 'usage')) measured.add(`${e.data.turn}:${e.data.step}`)
+    if (e.type === 'assistant/message' && e.data.usage !== undefined) measured.add(`${e.data.turn}:${e.data.step}`)
   }
   return steps.size > 0 && [...steps].every(key => measured.has(key))
 }
 /** Summaries contain bounded text; exact evidence remains in the indexed JSONL files. */
 function preview(event: SessionEvent): string {
-  if (['assistant/chunk', 'request/header', 'request/context', 'agent/inbox/spliced'].includes(event.type)) return event.type
+  // `assistant/attempt` replaces the removed `assistant/chunk` as the bulky log-only carrier: both hold a
+  // whole attempt stream, so either one would crowd out the summary if it were serialized.
+  if (['assistant/attempt', 'request/header', 'request/context', 'agent/inbox/spliced'].includes(event.type)) return event.type
   if (event.type === 'assistant/message') return JSON.stringify({ ...event.data, message: { ...event.data.message, content: event.data.message.content.filter(b => b.type !== 'reasoning') } }).slice(0, 350)
   return JSON.stringify(event.data).slice(0, 350)
 }
@@ -41,6 +43,9 @@ export function analyzeEvents(events: readonly SessionEvent[], inheritedCount: n
   let current: SessionEvent[] = []
   const groups: SessionEvent[][] = []
   for (const e of events) {
+    // `session/end-seed` closes a seeded Session's inherited prefix. It carries no execution facts, and it
+    // sits exactly on the inherited/own boundary, so grouping it would emit a factless turn row of its own.
+    if (e.type === 'session/end-seed') continue
     if (current.length && (e.type === 'turn/start' || (Number(e.seq) >= inheritedCount) !== (Number(current[0]!.seq) >= inheritedCount))) { groups.push(current); current = [] }
     current.push(e)
     if (e.type === 'turn/end') { groups.push(current); current = [] }

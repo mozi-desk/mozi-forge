@@ -18,27 +18,49 @@ class Persistence extends Service {
   data = new Map<string, { meta: SessionHeader; inheritedEventCount: number; events: SessionEvent[] }>()
   reads: string[] = []
   constructor(ctx: Context) { super(ctx, 'sessionPersistence') }
-  async readFrom(id: string) { this.reads.push(id); const row = this.data.get(id); if (!row) throw new Error('missing'); return structuredClone(row) }
+  /**
+   * Harness 0.1.5 exposes a per-session read handle rather than a `readFrom` result, so the stub answers
+   * `open(id, 'read')` with the same stored facts behind a handle shape: the header and fork cut travel
+   * on the handle, and `read(offset)` returns the event suffix from that logical offset.
+   */
+  async open(id: string) {
+    this.reads.push(id)
+    const row = this.data.get(id)
+    if (!row) throw new Error('missing')
+    const stored = structuredClone(row)
+    return {
+      header: stored.meta,
+      inheritedEventCount: stored.inheritedEventCount,
+      async read(offset = 0) { return { events: stored.events.filter(event => Number(event.seq) >= offset) } },
+      async close() {},
+    }
+  }
 }
 function turn(start: number, number = 1, size = 20): SessionEvent[] {
   const rows = [
     { type: 'turn/start', data: { turn: number } },
     { type: 'user/message', data: { id: `u${number}`, source: { kind: 'user' }, content: [{ type: 'text', text: '中😀文'.repeat(size) }] } },
     { type: 'step/start', data: { turn: number, step: 1 } },
-    { type: 'assistant/chunk', data: { turn: number, step: 1, chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 3 } } } },
-    { type: 'assistant/message', data: { turn: number, step: 1, usage: { inputTokens: 10, outputTokens: 3 }, message: { content: [{ type: 'reasoning', text: 'Investigate the failure.' }] } } },
+    // Harness 0.1.5 replaced the log-only `assistant/chunk` carrier with `assistant/attempt`, and moved
+    // token accounting onto the settlement event below. The row count stays at nine per turn because
+    // this fixture's callers index turns by a literal nine-row stride.
+    { type: 'assistant/attempt', data: { turn: number, step: 1, stream: [] } },
+    // `stream` is required on a settlement in 0.1.5; it stays empty here because these tests assert
+    // evidence, pagination and token accounting, not TTFT.
+    { type: 'assistant/message', data: { turn: number, step: 1, usage: { inputTokens: 10, outputTokens: 3 }, stream: [], message: { content: [{ type: 'reasoning', text: 'Investigate the failure.' }] } } },
     { type: 'tool/call', data: { callId: `c${number}`, name: 'bash', arguments: '{}' } },
     { type: 'tool/result', data: { message: { source: { callId: `c${number}` }, content: [{ type: 'tool-result', isError: true, content: [{ type: 'text', text: 'error: timeout' }] }] } } },
     { type: 'step/end', data: { turn: number, step: 1 } },
     { type: 'turn/end', data: { turn: number } },
   ]
-  return rows.map((e, index) => ({ ...e, seq: start + index, time: start + index })) as SessionEvent[]
+  return rows.map((e, index) => ({ ...e, seq: start + index, time: start + index })) as unknown as SessionEvent[]
 }
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'session-insights-')); directories.push(root); vi.stubEnv('DSH_HOME', root)
   const ctx = new Context(); contexts.push(ctx); await ctx.plugin(Persistence)
   const source = ctx.get('sessionPersistence') as unknown as Persistence
-  source.data.set('s0', { meta: { version: 1, isSeeded: false, id: SessionId('s0'), createdAt: 1, agentPreset: 'coding' }, inheritedEventCount: 0, events: turn(0) })
+  // Harness 0.1.5 writes format 3; a stored header must carry the version this build reads.
+  source.data.set('s0', { meta: { version: 3, isSeeded: false, id: SessionId('s0'), createdAt: 1, agentPreset: 'coding' }, inheritedEventCount: 0, events: turn(0) })
   await ctx.plugin(SessionInsights, { projectRoot: root })
   return { ctx, source, root, insights: ctx.sessionInsights }
 }
@@ -90,7 +112,7 @@ it('paginates query results and searches beyond event previews', async () => {
 })
 it('separates inherited execution and missing usage from measured own turns', async () => {
   const f = await fixture(), source = f.source.data.get('s0')!
-  source.events = [...turn(0), ...turn(9, 2).filter(e => e.type !== 'assistant/chunk')]
+  source.events = [...turn(0), ...turn(9, 2)]
   const message = source.events.findLast(e => e.type === 'assistant/message')!
   if (message.type === 'assistant/message') delete message.data.usage
   source.inheritedEventCount = 9
@@ -102,8 +124,8 @@ it('separates inherited execution and missing usage from measured own turns', as
 it('classifies structured failures, text hints, repeated calls and open tails independently', async () => {
   const f = await fixture(), events = turn(0).slice(0, 5)
   for (let i = 0; i < 4; i++) {
-    events.push({ type: 'tool/call', seq: 5+i*2, time: 5+i*2, data: { callId: `repeat${i}`, name: 'bash', arguments: '{"command":"poll"}' } } as SessionEvent)
-    if (i < 3) events.push({ type: 'tool/result', seq: 6+i*2, time: 6+i*2, data: { message: { source: { callId: `repeat${i}` }, content: [{ type: 'text', text: i === 0 ? '{"exitCode":2}' : 'error: possible issue' }] } } } as SessionEvent)
+    events.push({ type: 'tool/call', seq: 5+i*2, time: 5+i*2, data: { callId: `repeat${i}`, name: 'bash', arguments: '{"command":"poll"}' } } as unknown as SessionEvent)
+    if (i < 3) events.push({ type: 'tool/result', seq: 6+i*2, time: 6+i*2, data: { message: { source: { callId: `repeat${i}` }, content: [{ type: 'text', text: i === 0 ? '{"exitCode":2}' : 'error: possible issue' }] } } } as unknown as SessionEvent)
   }
   f.source.data.get('s0')!.events = events
   const snapshot = await f.insights.inspect({ session_id: 's0' }) as Summary
@@ -130,8 +152,8 @@ it('redacts persisted evidence and validates malformed requests before reading',
 it('finds alternating call patterns while leaving ordinary successful text outside failures', async () => {
   const f = await fixture(), events = turn(0).slice(0, 5)
   for (let i = 0; i < 6; i++) {
-    events.push({ type: 'tool/call', seq: 5+i*2, time: i*40000, data: { callId: `ab${i}`, name: i%2 ? 'poll' : 'inspect', arguments: i%2 ? { b: 2, a: 1 } : { path: 'file' } } } as SessionEvent)
-    events.push({ type: 'tool/result', seq: 6+i*2, time: i*40000+35000, data: { message: { source: { callId: `ab${i}` }, content: [{ type: 'text', text: 'There is no error.\n' + 'x'.repeat(9000) + '\nneedle\nline' }] } } } as SessionEvent)
+    events.push({ type: 'tool/call', seq: 5+i*2, time: i*40000, data: { callId: `ab${i}`, name: i%2 ? 'poll' : 'inspect', arguments: i%2 ? { b: 2, a: 1 } : { path: 'file' } } } as unknown as SessionEvent)
+    events.push({ type: 'tool/result', seq: 6+i*2, time: i*40000+35000, data: { message: { source: { callId: `ab${i}` }, content: [{ type: 'text', text: 'There is no error.\n' + 'x'.repeat(9000) + '\nneedle\nline' }] } } } as unknown as SessionEvent)
   }
   f.source.data.get('s0')!.events = events
   const summary = await f.insights.inspect({ session_id: 's0' }) as Summary
@@ -144,11 +166,12 @@ it('finds alternating call patterns while leaving ordinary successful text outsi
   }
 })
 
-it('ranks known token pressure without counting stream and final usage twice', async () => {
+it('ranks known token pressure from the settlement usage', async () => {
   const f = await fixture(), events = [...turn(0), ...turn(9, 2)]
+  // Harness 0.1.5 reports usage once per step, on the settlement event, so there is no second
+  // stream-carried usage left for this fixture to duplicate.
   for (const event of events.slice(9)) {
     if (event.type === 'assistant/message') event.data.usage = { inputTokens: 40000, outputTokens: 100, cacheReadTokens: 12 }
-    if (event.type === 'assistant/chunk' && event.data.chunk.type === 'usage') event.data.chunk.usage = { inputTokens: 40000, outputTokens: 100, cacheReadTokens: 12 }
   }
   f.source.data.get('s0')!.events = events
   const snapshot = await f.insights.inspect({ session_id: 's0' }) as Summary
@@ -184,7 +207,9 @@ it('attributes delayed failures and final usage to the continuation window witho
   expect(next.session?.metrics.confirmedToolFailures).toBe(1)
   expect(next.session?.metrics.toolCalls).toBe(0)
   expect(next.session?.metrics.knownTokens).toBe(0)
-  const chunk = await f.insights.incremental({ session_id: 's0', through: 3 })
+  // Harness 0.1.5 reports a step's usage on its settlement, so a prefix that must already know the
+  // usage has to include the settlement at seq 4 rather than stop at the stream position before it.
+  const chunk = await f.insights.incremental({ session_id: 's0', through: 4 })
   const final = await f.insights.incremental({ session_id: 's0', previous: chunk.checkpoint })
   expect(final.session?.metrics.knownTokens).toBe(0)
 })
@@ -202,8 +227,11 @@ it('keeps inherited execution out of Sleep metrics and reports missing usage and
   const event = source.events[13]!
   if (event.type === 'assistant/message') source.events[13] = { ...event, data: { ...event.data, usage: { inputTokens: 7, outputTokens: 1 } } }
   const corrected = await f.insights.incremental({ session_id: 's0', previous: beforeFinal.checkpoint })
-  expect(corrected.session?.metrics.knownTokens).toBe(0)
-  expect(corrected.session?.metrics.tokenCorrections.uncachedInputTokens).toBe(-3)
+  // The settlement at seq 13 sits outside the covered prefix, and it is the only carrier of this step's
+  // usage, so the shrunk value is newly observed rather than a correction of an earlier reading. A
+  // negative correction needs one step to report usage twice, which 0.1.5 no longer does.
+  expect(corrected.session?.metrics.knownTokens).toBe(8)
+  expect(corrected.session?.metrics.tokenCorrections.uncachedInputTokens).toBe(0)
 })
 it('retains a captured endpoint when persistence has not reached it and validates checkpoint inputs before reads', async () => {
   const f = await fixture()

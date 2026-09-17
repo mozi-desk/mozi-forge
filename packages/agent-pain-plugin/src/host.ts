@@ -9,6 +9,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { SessionId, SessionLogOffset, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { type SessionPersistence, listStoredSessions, readStoredSession } from '@mozi-forge/session-insights-plugin/session-reader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import { PainEngine } from './engine.js'
@@ -64,8 +65,8 @@ export class PainService extends Service {
     this.engine = new PainEngine(root)
     this.collector = new Collector(root, this.engine, async () => {
       const result = []
-      for (const row of await this.persistence().list()) {
-        const saved = await this.persistence().readFrom(SessionId(row.id), SessionLogOffset(0))
+      for (const row of await listStoredSessions(this.persistence())) {
+        const saved = await readStoredSession(this.persistence(), SessionId(row.id))
         const captured = initialEndpoints.get(String(row.id))
         const through = captured ?? (host.sessions.get(SessionId(row.id)) ? -1 : Number(saved.events.at(-1)?.seq ?? -1))
         result.push({ sessionId: String(row.id), through })
@@ -74,11 +75,13 @@ export class PainService extends Service {
     })
     host.on('agent/created', ({ agent }) => this.install(agent))
     host.on('session/event', (session, event) => {
+      // Harness 0.1.5 removed the `assistant/chunk` event and moved token accounting onto
+      // `assistant/message.usage`, which this whitelist already covers. Dropping the former
+      // chunk-usage clause therefore loses no collection trigger.
       if (
         !['turn/start', 'turn/end', 'step/start', 'step/end', 'tool/call', 'tool/result', 'assistant/message'].includes(
           event.type,
-        ) &&
-        !(event.type === 'assistant/chunk' && event.data.chunk.type === 'usage')
+        )
       )
         return
       this.pending = this.pending
@@ -95,32 +98,16 @@ export class PainService extends Service {
       await this.ready.catch(() => undefined)
     })
   }
-  private persistence() {
-    return this.host.get('sessionPersistence') as unknown as {
-      list(): Promise<
-        Array<{
-          id: string
-        }>
-      >
-      readFrom(
-        id: SessionId,
-        offset: SessionLogOffset,
-      ): Promise<{
-        events: readonly SessionEvent[]
-        meta?: {
-          agentPreset?: string
-        }
-        inheritedEventCount?: number
-      }>
-    }
+  private persistence(): SessionPersistence {
+    return this.host.get('sessionPersistence') as unknown as SessionPersistence
   }
   /** Read only checkpoint suffixes; persisted metadata supplies grouping and fork exclusion. */
   private async recover() {
     await this.engine.ready
     await this.collector.ready
-    for (const row of await this.persistence().list()) {
+    for (const row of await listStoredSessions(this.persistence())) {
       const cursor = await this.collector.cursor(String(row.id))
-      const saved = await this.persistence().readFrom(SessionId(row.id), SessionLogOffset(cursor + 1))
+      const saved = await readStoredSession(this.persistence(), SessionId(row.id), cursor + 1)
       const id = String(row.id)
       await this.collector.consume(
         {

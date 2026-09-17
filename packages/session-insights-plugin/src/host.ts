@@ -19,7 +19,9 @@ import { createInterface } from 'node:readline'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { SessionId, SessionLogOffset, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import { readStoredSession, type StoredSessionRead } from './session-reader.js'
 import z from '@deepseek-ai/schemastery'
 import { incrementalFacts, type IncrementalCheckpoint, type IncrementalSession } from './incremental.js'
 import { deriveMetrics } from './metrics.js'
@@ -31,7 +33,6 @@ export const name = 'mozi-session-insights'
 export interface Config { projectRoot: string }
 export const Config: z<Config> = z.object({ projectRoot: z.string().required() })
 export interface SessionSource { meta: SessionHeader; inheritedEventCount?: number; events: readonly SessionEvent[] }
-interface Persistence { readFrom(id: SessionId, from: SessionLogOffset): Promise<{ meta: SessionHeader; inheritedEventCount?: number; events: readonly SessionEvent[] }> }
 declare module '@deepseek-ai/cordis' { interface Context { sessionInsights: SessionInsights } }
 const MAX_BYTES = 8192
 const bytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value))
@@ -102,8 +103,8 @@ export class SessionInsights extends Service {
           return await this.index(input.session_id, latest.revision)
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
       }
-      let source: Awaited<ReturnType<Persistence['readFrom']>>
-      try { source = await (this.host as Context & { sessionPersistence: Persistence }).sessionPersistence.readFrom(SessionId(input.session_id), SessionLogOffset(0)) }
+      let source: StoredSessionRead
+      try { source = await readStoredSession((this.host as Context & { sessionPersistence: SessionPersistence }).sessionPersistence, SessionId(input.session_id)) }
       catch { throw new Error('SESSION_SOURCE_UNAVAILABLE: session missing or unreadable; verify the ID in this runtime') }
       if (String(source.meta.id) !== input.session_id) throw new Error('SESSION_IDENTITY_MISMATCH')
       return this.publish(source)
@@ -132,7 +133,7 @@ export class SessionInsights extends Service {
     if (input.through !== undefined && (!Number.isSafeInteger(input.through) || input.through < -1)) throw new Error('INVALID_SESSION_ENDPOINT')
     if (input.previous && (!Number.isSafeInteger(input.previous.through) || input.previous.through < -1 || !/^[a-f0-9]{64}$/u.test(input.previous.fingerprint))) throw new Error('INVALID_SESSION_CHECKPOINT')
     return this.serial.run(input.session_id, async () => {
-      const source = await (this.host as Context & { sessionPersistence: Persistence }).sessionPersistence.readFrom(SessionId(input.session_id), SessionLogOffset(0))
+      const source = await readStoredSession((this.host as Context & { sessionPersistence: SessionPersistence }).sessionPersistence, SessionId(input.session_id))
       if (String(source.meta.id) !== input.session_id) throw new Error('SESSION_IDENTITY_MISMATCH')
       if (input.through !== undefined && Number(source.events.at(-1)?.seq ?? -1) < input.through) throw new Error('SESSION_PREFIX_NOT_DURABLE')
       const events = source.events.filter(e => input.through === undefined || Number(e.seq) <= input.through).map(e => clean(e) as SessionEvent)
@@ -168,7 +169,9 @@ export class SessionInsights extends Service {
           const rawText = JSON.stringify(event) + '\n'
           await raw.writeFile(rawText)
           let focusedEvent: SessionEvent | undefined = event
-          if (['assistant/chunk', 'request/header', 'request/context', 'agent/inbox/spliced'].includes(event.type)) { focusedEvent = undefined; index.omittedEvents++ }
+          // `assistant/attempt` takes over the omitted role of the removed `assistant/chunk`: it embeds a
+          // whole attempt stream, which would crowd the focused view. The raw file still retains it.
+          if (['assistant/attempt', 'request/header', 'request/context', 'agent/inbox/spliced'].includes(event.type)) { focusedEvent = undefined; index.omittedEvents++ }
           else if (event.type === 'assistant/message') {
             const content = event.data.message.content.filter(block => block.type !== 'reasoning')
             index.omittedReasoningBlocks += event.data.message.content.length - content.length

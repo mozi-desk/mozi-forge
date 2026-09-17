@@ -17,6 +17,7 @@ import { JobId, type JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { safeId } from '@mozi-forge/human-request-plugin/host'
+import { registerRpcChannel } from '@mozi-forge/human-request-plugin/rpc-channel'
 import { symlink } from 'node:fs/promises'
 import type { HumanRequestService } from '@mozi-forge/human-request-plugin/host'
 import { artifactPage, containedPath, protectedPath, type ReadPosition } from './inspection.js'
@@ -184,7 +185,7 @@ export class AgentTestService extends Service {
     })
 
     hostContext.inject(['connection', 'webServer'], (connectionContext) => {
-      connectionContext.connection.rpc.handle('/mozi-agent-tests', async (endpoint, payload) => {
+      registerRpcChannel(connectionContext, '/mozi-agent-tests', async (endpoint, payload) => {
         const sessionId = typeof payload === 'object' && payload !== null
           ? (payload as { sessionId?: unknown }).sessionId
           : undefined

@@ -2,10 +2,9 @@ import { randomUUID } from 'node:crypto'
 import WebSocket from 'ws'
 import type {
   SessionCreateRequest, SessionCreateValue, SessionFollowFrame,
-  SessionPage, SessionPromptRequest, SessionPromptValue,
+  SessionPage, SessionPromptRequest, SessionPromptValue, SessionWireEvent,
 } from '@deepseek-ai/dsh-api-session-controller/types'
-import { decodeStorageRecord } from '@deepseek-ai/dsh-session/chunk-rows'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 
 type Snapshot = Extract<SessionFollowFrame, { type: 'snapshot' }>
 type Reply<T> = { result: { ok: true; value: T } }
@@ -46,7 +45,15 @@ export class HarnessSessionClient {
       this.call('session/create', request, signal),
     prompt: (request: Omit<SessionPromptRequest, 'requestId'>, signal?: AbortSignal): Promise<Reply<SessionPromptValue>> =>
       this.call('session/prompt', { ...request, requestId: randomUUID() }, signal),
-    history: async (request: { sessionId: SessionId; maxMessages: number }, signal?: AbortSignal): Promise<Reply<{ events: { event: SessionEvent }[] }>> => {
+    /**
+     * Read a session's full log, oldest page first.
+     *
+     * Harness 0.1.5 removed the packed chunk-run codec, so the controller journal now yields one raw
+     * event per record. Those events are typed `SessionWireEvent`, the envelope the Client journal
+     * adapter actually accepts: `type` stays a plain string because durable readers own recognition of
+     * merge-extensible event names, so this method relays the wire type verbatim.
+     */
+    history: async (request: { sessionId: SessionId; maxMessages: number }, signal?: AbortSignal): Promise<Reply<{ events: { event: SessionWireEvent }[] }>> => {
       const deadline = this.deadline(signal)
       const snapshot = await this.snapshot(request, deadline)
       let records = [...snapshot.records]
@@ -64,11 +71,9 @@ export class HarnessSessionClient {
         records = [...page.result.value.records, ...records]
         hasMore = page.result.value.hasMore
       }
-      const events = records.flatMap(({ event }) => decodeStorageRecord(
-        event.type.startsWith('chunkrow/')
-          ? { type: event.type.slice('chunkrow/'.length), seq0: event.seq, time0: event.time, data: event.data }
-          : event,
-      )).map(event => ({ event }))
+      // Harness 0.1.5 folded packed chunk runs into `assistant/message.stream`, so every history
+      // record is already one raw event and the chunk-row expansion codec is gone.
+      const events = records.map(({ event }) => ({ event }))
       return { result: { ok: true, value: { events } } }
     },
   }

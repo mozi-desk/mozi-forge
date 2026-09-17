@@ -63,7 +63,9 @@ export function incrementalFacts(events: readonly SessionEvent[], inherited: num
     }
   }
   const newCalls = [...calls.values()].filter(c => c.seq >= from)
-  const touchedSteps = new Set(added.filter(e => e.type === 'step/start' || e.type === 'assistant/message' || e.type === 'assistant/chunk').map(e => { const d = e.data as { turn: number; step: number }; return `${d.turn}:${d.step}` }))
+  // Harness 0.1.5 removed `assistant/chunk`; `assistant/message` is the settlement that carries both the
+  // step's usage and its embedded stream, so it alone marks a step as touched.
+  const touchedSteps = new Set(added.filter(e => e.type === 'step/start' || e.type === 'assistant/message').map(e => { const d = e.data as { turn: number; step: number }; return `${d.turn}:${d.step}` }))
   const stepEvents = own.filter(e => { const d = e.data as { turn?: number; step?: number }; return touchedSteps.has(`${d.turn}:${d.step}`) })
   return { checkpoint, session: {
     isNew: previous === undefined || previous.through < inherited,
