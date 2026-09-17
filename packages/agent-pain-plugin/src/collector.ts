@@ -3,6 +3,9 @@
  * Example: a crash after the third failed call writes pain but not collector.json;
  * replay repeats its stable session/turn/type identity and contributes no extra score.
  * Usage is replaced by step identity, not added twice. Completed turns release counters.
+ * The same pass advances the session's effective Agent preset: the creation header names
+ * only what a session started with, so every `agent-preset/selected` event recorded while
+ * the session was blank must move the identity a later pain is filed under.
  */
 import { join } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -11,6 +14,20 @@ import { toolResultState } from '@mozi-forge/session-insights-plugin/event-analy
 import { atomicJson, readJson } from './storage.js'
 import type { PainEngine } from './engine.js'
 import type { Source } from './types.js'
+/**
+ * The preset selection an event carries, or null for every other event.
+ * The payload is read structurally because only this plugin's Host composition knows the
+ * Agent-preset plugin, and the collector must work from a plain persisted session log.
+ */
+const selectedPreset = (event: SessionEvent): string | null => {
+  const candidate = event as { type?: string; data?: { agentPreset?: unknown } }
+  return candidate.type === 'agent-preset/selected' && typeof candidate.data?.agentPreset === 'string'
+    ? candidate.data.agentPreset
+    : null
+}
+/** Creation header advanced by every recorded selection, which is what a later turn ran under. */
+export const presetOf = (initial: string | null, events: readonly SessionEvent[]): string | null =>
+  events.reduce<string | null>((preset, event) => selectedPreset(event) ?? preset, initial)
 interface Turn {
   turnId: string
   confirmedToolFailures: number
@@ -36,6 +53,8 @@ export interface CollectorState {
     sessionId: string
     processedThroughSeq: number
     activeTurns: Turn[]
+    /** Effective preset; absent in states written before this field existed. */
+    agentPreset: string | null
   }>
 }
 export class Collector {
@@ -67,6 +86,7 @@ export class Collector {
         sessionId: s.sessionId,
         processedThroughSeq: s.through,
         activeTurns: [],
+        agentPreset: null,
       })),
     }
     await atomicJson(join(this.root, 'collector.json'), this.state)
@@ -76,6 +96,14 @@ export class Collector {
     await this.ready
     return this.state.sessions.find((s) => s.sessionId === id)?.processedThroughSeq ?? -1
   }
+  /**
+   * Effective preset already recorded for a session, or null when none is stored yet.
+   * A Host otherwise has no way to know whether a selection event sits behind the cursor.
+   */
+  async preset(id: string) {
+    await this.ready
+    return this.state.sessions.find((s) => s.sessionId === id)?.agentPreset ?? null
+  }
   /** Commit a batch only after every threshold occurrence is durable; failure retains the old cursor. */
   async consume(source: Omit<Source, 'turnId' | 'eventSeq'>, events: readonly SessionEvent[], inheritedThrough = -1) {
     const task = this.queue
@@ -84,12 +112,19 @@ export class Collector {
         const next = structuredClone(this.state)
         let s = next.sessions.find((s) => s.sessionId === source.sessionId)
         if (!s) {
-          s = { sessionId: source.sessionId, processedThroughSeq: inheritedThrough, activeTurns: [] }
+          s = {
+            sessionId: source.sessionId,
+            processedThroughSeq: inheritedThrough,
+            activeTurns: [],
+            agentPreset: source.agentPreset,
+          }
           next.sessions.push(s)
         }
         const policy = await this.pains.currentPolicy()
+        let preset = s.agentPreset ?? source.agentPreset
         for (const event of events) {
           if (Number(event.seq) <= Math.max(s.processedThroughSeq, inheritedThrough)) continue
+          preset = selectedPreset(event) ?? preset
           const data = event.data as {
             turn?: number
             step?: number
@@ -160,11 +195,11 @@ export class Collector {
                   : metrics.knownTokens >= policy.execution.tokensPerTurn)
               ) {
                 const key = JSON.stringify([
-                  source.agentPreset ?? source.sessionId,
+                  preset ?? source.sessionId,
                   type,
                   ...(type === 'tool_failure' ? [toolName ?? 'unknown', failureKind ?? 'failed_result'] : []),
                 ])
-                await this.pains.automatic(type, { ...source, turnId, eventSeq: Number(event.seq) }, metrics, key)
+                await this.pains.automatic(type, { ...source, agentPreset: preset, turnId, eventSeq: Number(event.seq) }, metrics, key)
                 if (!turn.emittedTypes.includes(type)) turn.emittedTypes.push(type)
               }
             }
@@ -172,6 +207,7 @@ export class Collector {
           }
           s.processedThroughSeq = Number(event.seq)
         }
+        s.agentPreset = preset
         await atomicJson(join(this.root, 'collector.json'), next)
         this.state = next
       })

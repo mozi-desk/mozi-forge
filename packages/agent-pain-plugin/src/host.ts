@@ -12,7 +12,7 @@ import { SessionId, SessionLogOffset, type Session, type SessionEvent } from '@d
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import { PainEngine } from './engine.js'
-import { Collector } from './collector.js'
+import { Collector, presetOf } from './collector.js'
 import { submitParameters, listParameters, readParameters } from './contracts.js'
 import { painPrompt } from './prompt.js'
 import type { Source } from './types.js'
@@ -31,13 +31,17 @@ export const output = {
   schema: { type: 'json' as const },
   render: (_: unknown, v: JsonValue) => [{ type: 'text' as const, text: JSON.stringify(v) }],
 }
+/** Identity of the running session: the header advanced by every recorded preset selection. */
 export function sourceOf(agent: Agent, callId?: string): Source {
   const events = agent.session.snapshotEvents()
   const turn = events.findLast((e) => e.type === 'turn/start')
   return {
     sessionId: String(agent.session.id),
     agentId: String(agent.id),
-    agentPreset: typeof agent.session.header.agentPreset === 'string' ? agent.session.header.agentPreset : null,
+    agentPreset: presetOf(
+      typeof agent.session.header.agentPreset === 'string' ? agent.session.header.agentPreset : null,
+      events,
+    ),
     turnId: turn?.type === 'turn/start' ? String(turn.data.turn) : '0',
     eventSeq: Number(events.at(-1)?.seq ?? 0),
     ...(callId ? { toolCallId: callId } : {}),
@@ -117,8 +121,14 @@ export class PainService extends Service {
     for (const row of await this.persistence().list()) {
       const cursor = await this.collector.cursor(String(row.id))
       const saved = await this.persistence().readFrom(SessionId(row.id), SessionLogOffset(cursor + 1))
+      const id = String(row.id)
       await this.collector.consume(
-        { sessionId: String(row.id), agentId: String(row.id), agentPreset: saved.meta?.agentPreset ?? null },
+        {
+          sessionId: id,
+          agentId: id,
+          // Stored identity wins; otherwise advance the persisted header by this replay.
+          agentPreset: (await this.collector.preset(id)) ?? presetOf(saved.meta?.agentPreset ?? null, saved.events),
+        },
         saved.events,
         Number(saved.inheritedEventCount ?? 0) - 1,
       )
@@ -129,11 +139,19 @@ export class PainService extends Service {
     const events = session.snapshotEvents(SessionLogOffset(cursor + 1))
     if (!events.length) return
     if (!(await this.host.sessions.flush(session))) throw new Error('PAIN_PERSISTENCE_REQUIRED')
+    const id = String(session.id)
     await this.collector.consume(
       {
-        sessionId: String(session.id),
-        agentId: String(session.id),
-        agentPreset: typeof session.header.agentPreset === 'string' ? session.header.agentPreset : null,
+        sessionId: id,
+        agentId: id,
+        // Initial value only. A stored value survives restarts; a session whose selection event
+        // already sits behind the cursor is resolved from the whole log instead of this batch.
+        agentPreset:
+          (await this.collector.preset(id)) ??
+          presetOf(
+            typeof session.header.agentPreset === 'string' ? session.header.agentPreset : null,
+            session.snapshotEvents(),
+          ),
       },
       events,
       Number(session.inheritedEventCount) - 1,
