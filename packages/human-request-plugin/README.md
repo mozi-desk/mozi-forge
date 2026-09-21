@@ -17,6 +17,13 @@ through public Harness services; client bundles use the declared DSH client meta
 
 Requests contain Markdown and an open type string. Public respond RPC persists replies before notification; retries reuse request identity.
 
+The request center follows the Harness global language preference. English and
+Chinese dictionaries cover the tab, filters, form labels, empty state, and editable
+quick replies. Harness resolves language-pack fallbacks to English and refreshes
+localized slots when the language changes. Request Markdown and saved replies
+retain their original content. Additional language packs can register dictionaries
+under the `mozi-human-requests` namespace.
+
 See [Architecture](../../docs/architecture.md) and the
 [training tutorial](../../docs/training.md) for the full composition.
 

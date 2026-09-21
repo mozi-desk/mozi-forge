@@ -20,7 +20,8 @@
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-api-session-controller",
-        "@deepseek-ai/dsh-client-ui-renderer"
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale"
       ],
       "platform": "web"
     }
@@ -44,7 +45,8 @@
     "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
     "@deepseek-ai/dsh-util-values": "0.1.5-rc.2",
     "react-markdown": "10.1.0",
-    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.2"
+    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.1.5-rc.2"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
