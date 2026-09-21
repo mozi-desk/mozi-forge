@@ -56,7 +56,7 @@ When the Host provides a workspace registry, the worktree is registered as
 That session continues the existing Plan at autonomous implementation, using native tools
 and child agents in the worktree. Repeated preparation returns the same identity;
 after Host recovery it resumes the saved session and preserves files and reviews.
-Workspace preparation requires approval of the current plan body. Updated scope requires a new plan decision.
+For `human_request_submit(type=plan-review, planId=...)`, the Host checks Plan ownership and fills the displayed title and body from the saved Plan before persisting the request. The caller can use a short body identifying the review. Workspace preparation requires approval of that saved scope; updated scope requires a new plan decision.
 
 The Plan retains its analysis `sessionId` and records `executionSessionId`.
 Both identities can access the Plan; other sessions can read its public summary.

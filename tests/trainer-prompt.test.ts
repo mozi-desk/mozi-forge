@@ -19,6 +19,7 @@ const CONTRACT_PHRASES = [
   'Decide mechanical internals yourself',
   'what will change, why it should change, and how success will be accepted',
   'This is the single human approval boundary',
+  'The Host fills the review title and body from the saved plan',
   'call agent_test_review with pass/fail',
   'call trainer_merge with plan_id',
 ]

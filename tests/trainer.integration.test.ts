@@ -299,3 +299,37 @@ it('paginates global plan summaries and reads the first paragraph of legacy plan
   } while (cursor)
   expect(new Set(ids).size).toBe(23)
 })
+
+
+it('renders saved plan scope before approval even when the Agent submits a paraphrase', async () => {
+  const f = await setup()
+  const plan = await f.call('trainer_plan_save', { title: 'Apply release rule', description: 'Persist the team rule.', body: 'Block releases below 4096 MiB after rollback reserve. Accept on the four unchanged cases.' })
+  const args = { type: 'plan-review', planId: plan.id, requestId: 'canonical-plan-review', title: 'Short summary', body: 'Please approve the release rule.' }
+  const submitted = await f.call('human_request_submit', args)
+  const displayed = await f.ctx.humanRequests.read(submitted.id)
+  expect(displayed.title).toBe(plan.title)
+  expect(displayed.body).toBe(plan.body)
+  expect(displayed.response).toBeUndefined()
+  expect(await f.call('human_request_submit', { ...args, body: 'Same review, paraphrased again.' })).toEqual(submitted)
+  await f.ctx.humanRequests.respond(submitted.id, '', 'approve')
+  const prepared = await f.call('trainer_workspace_prepare', { plan_id: plan.id })
+  expect(prepared.executionSessionId).toBeTruthy()
+  expect(await f.ctx.humanRequests.list({ planId: plan.id })).toHaveLength(1)
+  await f.restartTrainer()
+  expect((await f.call('trainer_workspace_prepare', { plan_id: plan.id })).executionSessionId).toBe(prepared.executionSessionId)
+  await f.call('trainer_plan_save', { id: plan.id, title: plan.title, description: plan.description, body: 'Change acceptance to two cases.' })
+  await expect(f.call('trainer_workspace_prepare', { plan_id: plan.id })).rejects.toThrow('Plan approval')
+  expect((await f.ctx.humanRequests.read(submitted.id)).body).toBe(plan.body)
+})
+
+it('rejects missing, unknown and other-owner plan reviews before creating a human request', async () => {
+  const f = await setup()
+  await expect(f.call('human_request_submit', { type: 'plan-review', body: 'Review it.' })).rejects.toThrow('requires planId')
+  await expect(f.call('human_request_submit', { type: 'plan-review', planId: 'unknown-plan', body: 'Review it.' })).rejects.toThrow('Unknown training plan')
+  const plan = await f.call('trainer_plan_save', { title: 'Owned scope', description: 'Owned review.', body: 'Only this scope.' })
+  const other = await f.createAgent()
+  await expect(f.callAs(other, 'human_request_submit', { type: 'plan-review', planId: plan.id, body: 'Approve another plan.' })).rejects.toThrow('another session')
+  expect(await f.ctx.humanRequests.list()).toEqual([])
+  const question = await f.call('human_request_submit', { type: 'question', title: 'Question', body: 'Which server?' })
+  expect((await f.ctx.humanRequests.read(question.id)).body).toBe('Which server?')
+})

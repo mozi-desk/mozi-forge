@@ -41,3 +41,12 @@ subprocesses and a disposable Git repository. It does not prove live-model quali
 Evaluation state is written under `$DSH_HOME/agent-tests`; plan-associated evidence
 is under `$DSH_HOME/trainning/<plan-id>`. Stop or cancel through public Agent Test
 interfaces. Reports distinguish execution failure, automatic checks and artifact assessments.
+
+
+### Plan review content
+
+Submit `human_request_submit` with `type: plan-review` and the saved `planId`.
+The Host loads that Plan, verifies the submitting session owns it, and populates
+the review title and body before displaying it. A short caller-supplied body can
+identify the review; the displayed scope comes from the saved Plan. Approval
+unlocks that scope. Editing the scope or acceptance criteria requires a new review.

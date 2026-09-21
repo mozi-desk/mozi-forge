@@ -43,3 +43,10 @@ reviews require a decision; `body` is an optional human note. The service persis
 the decision and its timestamp before notifying the owner. Retries retain the note
 and decision. An earlier response can receive an explicit decision while preserving
 its body; the interface offers confirmation controls for these records.
+
+
+Before persisting a submission, `human-request/prepare(input, sessionId)` lets a
+domain Host populate and validate its user-facing review. The prepared input is
+validated again before writing. Trainer uses this boundary to check Plan ownership
+and populate `plan-review` title/body from the saved Plan. Ordinary questions keep
+their submitted Markdown. Saved responses remain bound to the content displayed.

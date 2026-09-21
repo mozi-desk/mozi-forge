@@ -2,7 +2,7 @@
 import { validateArgs } from '@deepseek-ai/dsh-tools'
 import type { HumanRequestSubmitInput } from './types.js'
 export const humanRequestParameters = {
-  body: { type: 'string', required: true, description: 'Markdown question, evidence and requested decision.' },
+  body: { type: 'string', required: true, description: 'Markdown question, evidence and requested decision. For plan-review, the Host uses the saved plan body identified by planId.' },
   title: { type: 'string' }, type: { type: 'string' }, planId: { type: 'string' }, requestId: { type: 'string' },
 } as const
 export function parseHumanRequest(value: unknown): HumanRequestSubmitInput {

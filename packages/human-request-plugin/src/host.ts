@@ -22,7 +22,7 @@ import type { HumanDecision, HumanRequest, HumanRequestListInput, HumanRequestSu
 export const name = 'mozi-human-request-host'
 export interface Config { projectRoot: string }
 export const Config: z<Config> = z.object({ projectRoot: z.string().required() })
-declare module '@deepseek-ai/cordis' { interface Context { humanRequests: HumanRequestService } interface Events { 'human-request/answered'(request: HumanRequest): Promise<void> } }
+declare module '@deepseek-ai/cordis' { interface Context { humanRequests: HumanRequestService } interface Events { 'human-request/answered'(request: HumanRequest): Promise<void>; 'human-request/prepare'(input: HumanRequestSubmitInput, sessionId: string): Promise<void> } }
 export function safeId(id: string): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,150}$/u.test(id)) throw new Error('Invalid record id')
   return id
@@ -55,7 +55,7 @@ export class HumanRequestService extends Service {
     }))
     host.on('agent/created', ({ agent }) => {
       const tools = agent.ctx?.get('tools')
-      tools?.register(defineTool({ name: 'human_request_submit', description: 'Submit a user-facing plan or question using Markdown.', parameters: humanRequestParameters, output,
+      tools?.register(defineTool({ name: 'human_request_submit', description: 'Submit a user-facing plan or question using Markdown. For plan-review, provide planId; the Trainer Host supplies the saved plan title and body shown for approval.', parameters: humanRequestParameters, output,
         execute: async args => { const request = await this.submit(args, agent); return json({ id: request.id, type: request.type, status: request.status, planId: request.planId }) },
       }))
       tools?.register(defineTool({ name: 'human_request_read', description: 'Read an owned request or list requests for this session and optional plan.', parameters: { id: { type: 'string' }, plan_id: { type: 'string' } }, output,
@@ -71,8 +71,12 @@ export class HumanRequestService extends Service {
   }
   /** Validate and save an idempotent question. */
   async submit(raw: HumanRequestSubmitInput, owner: Agent | string): Promise<HumanRequest> {
-    const input = parseHumanRequest(raw)
+    let input = parseHumanRequest(raw)
     const sessionId = typeof owner === 'string' ? owner : String(owner.id)
+    // Domain Hosts populate the review before it becomes visible. For example,
+    // Trainer copies the saved plan so the human sees exactly the scope it gates.
+    await this.host.serial('human-request/prepare', input, sessionId)
+    input = parseHumanRequest(input)
     const id = safeId(input.requestId ?? randomUUID())
     return this.serial(id, async () => {
       const existing = await this.read(id).catch((e: NodeJS.ErrnoException) => { if (e.code !== 'ENOENT') throw e; return undefined })

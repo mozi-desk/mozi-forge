@@ -52,6 +52,13 @@ export class TrainerService extends Service {
     host.effect(() => async () => { for (const handle of this.handles.values()) await handle.dispose(); this.handles.clear() })
     this.projectRoot = resolve(config.projectRoot)
     this.root = join(resolve(process.env.DSH_HOME ?? join(this.projectRoot, '.runtime')), 'trainning')
+    host.on('human-request/prepare', async (input, owner) => {
+      if (input.type !== 'plan-review') return
+      if (!input.planId) throw new Error('plan-review requires planId from trainer_plan_save')
+      const plan = await this.read(input.planId, owner)
+      input.title = plan.title
+      input.body = plan.body
+    })
   }
   directory(id: string): string { return join(this.root, safeId(id)) }
   workspace(id: string): string { return join(this.directory(id), 'workspace') }
