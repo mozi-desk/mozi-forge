@@ -92,6 +92,25 @@ export class SessionInsights extends Service {
       return this.remember(index)
     } catch { throw new Error('SESSION_SNAPSHOT_UNAVAILABLE: inspect the session or restore its evidence files') }
   }
+  /** Import a complete external prefix through the same immutable evidence publisher.
+   * Example: a Kafka-backed reader freezes events 0..42; Trainer can reference that revision.
+   * The caller supplies a captured header and all inherited events. Gaps reject before publication.
+   */
+  async importSnapshot(source: SessionSource): Promise<SessionReference> {
+    const id = String(source.meta?.id ?? '')
+    validate(inspectParameters, { session_id: id })
+    if (!source.meta || source.meta.version !== 3 || !Number.isFinite(source.meta.createdAt)
+      || !Array.isArray(source.events) || !Number.isSafeInteger(source.inheritedEventCount ?? 0)
+      || (source.inheritedEventCount ?? 0) < 0 || (source.inheritedEventCount ?? 0) > source.events.length
+      || source.events.some((e, i) => !e || Number(e.seq) !== i || typeof e.type !== 'string'
+        || !Number.isFinite(e.time) || !e.data || typeof e.data !== 'object'))
+      throw new Error('INVALID_SESSION_PREFIX')
+    const captured = structuredClone(source)
+    return this.serial.run(id, async () => {
+      const index = await this.publish(captured)
+      return { sessionId: index.sessionId, revision: index.revision }
+    })
+  }
   /** Inspect one ID, publishing evidence only after all files and their index are written. */
   async inspect(input: { session_id: string; refresh?: boolean }): Promise<unknown> {
     validate(inspectParameters, input)

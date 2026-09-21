@@ -29,3 +29,11 @@ pnpm --filter @mozi-forge/session-insights-plugin test:unit
 ```
 
 Root integration tests exercise shared services and the real Web execution path.
+
+## External evidence
+
+`sessionInsights.importSnapshot(source: SessionSource)` accepts a complete ordered
+session prefix, including its header and inherited-event count, and returns a
+`SessionReference`. It validates continuity before publishing through the same
+immutable, redacted snapshot writer used by local inspection. Imported revisions
+work with `reference`, `read`, `query`, Trainer plans and reflection completion.

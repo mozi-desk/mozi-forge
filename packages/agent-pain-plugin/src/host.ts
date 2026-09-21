@@ -20,8 +20,10 @@ import type { Source } from './types.js'
 export const name = 'mozi-agent-pain-host'
 export interface Config {
   projectRoot: string
+  /** External collectors feed the public collector after transport durability. */
+  collectionMode?: 'local' | 'external'
 }
-export const Config: z<Config> = z.object({ projectRoot: z.string().required() })
+export const Config: z<Config> = z.object({ projectRoot: z.string().required(), collectionMode: z.union(['local', 'external']).default('local') })
 declare module '@deepseek-ai/cordis' {
   interface Context {
     pains: PainService
@@ -64,6 +66,7 @@ export class PainService extends Service {
     const initialEndpoints = new Map(host.sessions.list().map(session => [String(session.id), Number(session.snapshotEvents().at(-1)?.seq ?? -1)]))
     this.engine = new PainEngine(root)
     this.collector = new Collector(root, this.engine, async () => {
+      if (config.collectionMode === 'external') return []
       const result = []
       for (const row of await listStoredSessions(this.persistence())) {
         const saved = await readStoredSession(this.persistence(), SessionId(row.id))
@@ -74,7 +77,7 @@ export class PainService extends Service {
       return result
     })
     host.on('agent/created', ({ agent }) => this.install(agent))
-    host.on('session/event', (session, event) => {
+    if (config.collectionMode !== 'external') host.on('session/event', (session, event) => {
       // Harness 0.1.5 removed the `assistant/chunk` event and moved token accounting onto
       // `assistant/message.usage`, which this whitelist already covers. Dropping the former
       // chunk-usage clause therefore loses no collection trigger.
@@ -91,7 +94,9 @@ export class PainService extends Service {
           host.logger.warn('PAIN_COLLECTION_FAILED: replay required')
         })
     })
-    this.ready = this.recover()
+    this.ready = config.collectionMode === 'external'
+      ? Promise.all([this.engine.ready, this.collector.ready]).then(() => undefined)
+      : this.recover()
     void this.ready.catch(() => host.logger.warn('PAIN_STARTUP_FAILED'))
     host.effect(() => async () => {
       await this.pending

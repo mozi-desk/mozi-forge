@@ -244,3 +244,18 @@ it('retains a captured endpoint when persistence has not reached it and validate
   expect(captured.hasMore).toBe(true)
   expect((await f.insights.incremental({ session_id: 's0', previous: captured.checkpoint })).session?.analysisRange).toEqual({ from: 6, through: 8 })
 })
+
+it('imports external evidence through the public API and preserves prior revisions', async () => {
+  const f = await fixture()
+  const source = f.source.data.get('s0')!
+  const first = await f.insights.importSnapshot(source)
+  expect(await f.insights.reference(first)).toEqual(first)
+  expect(await f.insights.importSnapshot(source)).toEqual(first)
+  expect(f.source.reads).toEqual([])
+  const prefix = { ...source, events: source.events.slice(0, 4) }
+  const second = await f.insights.importSnapshot(prefix)
+  expect(second.revision).not.toBe(first.revision)
+  expect((await f.insights.read({ session_id: first.sessionId, revision: first.revision, from: 0, through: 8 }) as Page).text).toContain('c1')
+  await expect(f.insights.importSnapshot({ ...source, events: source.events.slice(1) })).rejects.toThrow('INVALID_SESSION_PREFIX')
+  await expect(f.insights.importSnapshot({ ...source, inheritedEventCount: 500 })).rejects.toThrow('INVALID_SESSION_PREFIX')
+})

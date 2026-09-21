@@ -29,3 +29,12 @@ pnpm --filter @mozi-forge/agent-pain-plugin test:unit
 ```
 
 Root integration tests exercise shared services and the real Web execution path.
+
+## External event collection
+
+Host config `collectionMode` is `local` by default. Set it to `external` when a
+transport adapter owns event delivery and feeds `pains.collector.consume()`.
+External mode retains the Pain engine and all Agent tools; the collector starts
+without local-session replay. The adapter owns sequence continuity and durable
+transport checkpoints. Collector persistence and occurrence identities provide
+idempotence across retries.
