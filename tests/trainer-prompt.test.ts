@@ -17,6 +17,10 @@ const CONTRACT_PHRASES = [
   'Never build a decision list out of internal identifiers',
   'Do not ask the human to read, review or approve an internal document',
   'Decide mechanical internals yourself',
+  'what will change, why it should change, and how success will be accepted',
+  'This is the single human approval boundary',
+  'call agent_test_review with pass/fail',
+  'call trainer_merge with plan_id',
 ]
 
 /**

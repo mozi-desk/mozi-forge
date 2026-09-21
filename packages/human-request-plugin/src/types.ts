@@ -1,12 +1,5 @@
 /** Durable human questions and Markdown answers shared by the Host and browser. */
-export interface MergeSnapshot {
-  baseCommit: string
-  tree: string
-  targetBranch: string
-  checks: string[]
-  commit?: string
-  integratedCommit?: string
-}
+export type HumanDecision = 'approve' | 'request-changes'
 export interface HumanRequest {
   id: string
   type: string
@@ -16,8 +9,7 @@ export interface HumanRequest {
   status: 'pending' | 'answered'
   createdAt: string
   planId?: string
-  merge?: MergeSnapshot
-  response?: { body: string; answeredAt: string } | null
+  response?: { body: string; answeredAt: string; decision?: HumanDecision; decidedAt?: string } | null
   deliveredAt?: string
 }
 export interface HumanRequestSubmitInput {
@@ -26,8 +18,6 @@ export interface HumanRequestSubmitInput {
   type?: string
   planId?: string
   requestId?: string
-  targetBranch?: string
-  checks?: string[]
 }
 export interface HumanRequestListInput {
   status?: 'pending' | 'answered'

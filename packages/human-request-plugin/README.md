@@ -18,8 +18,7 @@ through public Harness services; client bundles use the declared DSH client meta
 Requests contain Markdown and an open type string. Public respond RPC persists replies before notification; retries reuse request identity.
 
 The request center follows the Harness global language preference. English and
-Chinese dictionaries cover the tab, filters, form labels, empty state, and editable
-quick replies. Harness resolves language-pack fallbacks to English and refreshes
+Chinese dictionaries cover the tab, filters, form labels, empty state, and decision controls. Harness resolves language-pack fallbacks to English and refreshes
 localized slots when the language changes. Request Markdown and saved replies
 retain their original content. Additional language packs can register dictionaries
 under the `mozi-human-requests` namespace.
@@ -36,3 +35,11 @@ pnpm --filter @mozi-forge/human-request-plugin test:unit
 ```
 
 Root integration tests exercise shared services and the real Web execution path.
+
+Host-generated standalone test titles and reply instructions are localized at render time;
+authored Markdown is preserved. The response RPC accepts `{ id, body, decision }`,
+with `decision` set to `approve` or `request-changes`. Plan and standalone test
+reviews require a decision; `body` is an optional human note. The service persists
+the decision and its timestamp before notifying the owner. Retries retain the note
+and decision. An earlier response can receive an explicit decision while preserving
+its body; the interface offers confirmation controls for these records.

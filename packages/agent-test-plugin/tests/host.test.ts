@@ -7,6 +7,7 @@ import Commands from '@deepseek-ai/dsh-commands'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentTestService } from '../src/host.js'
+import type { HumanRequest } from '@mozi-forge/human-request-plugin/types'
 import { emptyMetrics } from '../src/metrics.js'
 import type { AgentTestRunResult } from '../src/types.js'
 
@@ -144,7 +145,7 @@ cases:
     expect(stored.humanReview.reviewedAt).toEqual(expect.any(Number))
     expect(appended.map(event => event.type)).toEqual(['command/run', 'command/done'])
     expect(await readFile(join(runRoot, 'review.md'), 'utf8')).toContain('Note: looks good')
-    await expect(ctx.agentTests.review(runId, 'fail', 'other-human-session')).rejects.toThrow(/not waiting for human review/u)
+    await expect(ctx.agentTests.review(runId, 'fail', 'other-human-session')).rejects.toThrow(/not waiting for artifact review/u)
 
     const concurrentId = '20260828010103-1234abcd'
     const concurrentRoot = join(runtimeHome, 'agent-tests/runs', concurrentId)
@@ -186,12 +187,41 @@ cases:
       humanReview: { ...structuredClone(result.humanReview), status: 'pending' },
     }
     await writeFile(join(trialRoot, 'result.json'), JSON.stringify(trial))
-    await expect(ctx.agentTests.review(trialId, 'pass', 'human-review-session')).resolves.toMatchObject({
-      status: 'passed',
-      humanReview: { status: 'passed', reviewedBySessionId: 'human-review-session' },
+    await writeFile(join(trialRoot, 'dsh-process.json'), JSON.stringify({ ...JSON.parse(await readFile(join(runRoot, 'dsh-process.json'), 'utf8')), ownerSessionId: String(ownerAgent.id) }))
+    await expect(ctx.agentTests.reviewByAgent(trialId, 'pass', reviewerAgent, 'Inspected artifact')).rejects.toThrow('owner')
+    await expect(ctx.agentTests.reviewByAgent(runId, 'pass', ownerAgent, 'Inspected artifact')).rejects.toThrow('owner')
+    await expect(ctx.agentTests.reviewByAgent(trialId, 'pass', ownerAgent, ' ')).rejects.toThrow('note')
+    await expect(ctx.agentTests.reviewByAgent(trialId, 'pass', ownerAgent, 'Inspected report: meets the output criterion.')).resolves.toMatchObject({
+      status: 'passed', humanReview: { status: 'passed', reviewedBySessionId: String(ownerAgent.id) },
     })
+    expect((await ctx.agentTests.status(trialId)).humanReview.note).toContain('meets the output criterion')
+    expect((await ctx.agentTests.status(trialId)).process?.testStatus).toBe('passed')
+    await expect(ctx.agentTests.reviewByAgent(trialId, 'pass', ownerAgent, 'Inspected report: meets the output criterion.')).resolves.toMatchObject({ status: 'passed' })
 
     await expect(ctx.agentTests.review('20260828010104-1234abcd', 'pass', 'human-review-session')).rejects.toThrow(/agent test run not found/u)
+    const answers = new Map<string, HumanRequest>()
+    class ReviewRequests extends Service {
+      constructor(context: Context) { super(context, 'humanRequests') }
+      async read(id: string): Promise<HumanRequest> {
+        const answer = answers.get(id)
+        if (!answer) throw Object.assign(new Error('Missing request'), { code: 'ENOENT' })
+        return answer
+      }
+    }
+    await ctx.plugin(ReviewRequests)
+    for (const [index, decision, body, expected] of [
+      [10, 'approve', '任意说明', 'passed'],
+      [11, 'request-changes', 'Acceptance passed.', 'review-failed'],
+      [12, undefined, '通过验收', 'waiting-human'],
+    ] as const) {
+      const decisionId = `202608280101${index}-1234abcd`
+      const decisionRoot = join(runtimeHome, 'agent-tests/runs', decisionId)
+      await mkdir(decisionRoot, { recursive: true })
+      await writeFile(join(decisionRoot, 'result.json'), JSON.stringify({ ...structuredClone(result), runId: decisionId }))
+      answers.set(`test-${decisionId}`, { id: `test-${decisionId}`, type: 'test-review', sessionId: 'human', title: 'Review', body: 'Evidence', status: 'answered', createdAt: 'today', response: { body, answeredAt: 'today', ...(decision ? { decision } : {}) } })
+      expect((await ctx.agentTests.status(decisionId)).status).toBe(expected)
+      expect(JSON.parse(await readFile(join(decisionRoot, 'result.json'), 'utf8')).status).toBe(expected)
+    }
     await ctx.fiber.dispose()
   })
 })

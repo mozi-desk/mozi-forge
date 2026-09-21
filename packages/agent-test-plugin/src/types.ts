@@ -172,7 +172,7 @@ export interface HumanReview {
   note?: string
 }
 
-export type AgentTestRunStatus = 'running' | 'failed' | 'waiting-human' | 'passed' | 'review-failed' | 'cancelled'
+export type AgentTestRunStatus = 'running' | 'failed' | 'waiting-human' | 'waiting-review' | 'passed' | 'review-failed' | 'cancelled'
 export type AgentTestProcessLifecycle = 'queued' | 'starting' | 'running' | 'stopping' | 'exited'
 
 export interface AgentTestProcessView {

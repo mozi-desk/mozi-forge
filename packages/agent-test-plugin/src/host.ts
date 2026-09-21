@@ -179,7 +179,7 @@ export class AgentTestService extends Service {
       })
       void this.list().then(async views => {
         for (const view of views) await this.reconcileReview(view.runId)
-        for (const view of views) if (view.planId !== undefined && view.result !== undefined && !view.result.humanReview.required) await this.notifyCompleted(view)
+        for (const view of views) if (view.planId !== undefined && view.result !== undefined) await this.notifyCompleted(view)
       }).catch(error => this.hostContext.logger.warn('agent-test notification recovery failed: %s', errorText(error)))
       return () => { if (this.humanRequestService === humanContext.humanRequests) this.humanRequestService = undefined }
     })
@@ -383,20 +383,30 @@ export class AgentTestService extends Service {
     const current = this.active.get(id)
     const view = current ? this.publicView(current) : await this.readCompleted(id)
     if (view.status !== 'waiting-human') return
-    const answer = request.response.body.trim()
-    if (answer === '通过验收' || answer.startsWith('未通过：')) await this.review(id, answer === '通过验收' ? 'pass' : 'fail', request.sessionId, answer)
+    const { decision, body } = request.response
+    if (decision === 'approve' || decision === 'request-changes') await this.review(id, decision === 'approve' ? 'pass' : 'fail', request.sessionId, body)
+  }
+
+  /** Plan-associated artifacts are assessed by their owning Trainer with a recorded rationale. */
+  async reviewByAgent(id: string, verdict: 'pass' | 'fail', caller: Agent, note: string): Promise<AgentTestRunView> {
+    if (verdict !== 'pass' && verdict !== 'fail') throw new Error('Invalid review verdict')
+    if (!note.trim()) throw new Error('Evidence-based review note required')
+    const view = await this.status(id, caller)
+    if (!view.planId || view.ownerSessionId !== String(caller.id)) throw new Error('Training evaluation owner required')
+    if (view.humanReview.status === (verdict === 'pass' ? 'passed' : 'failed') && view.humanReview.reviewedBySessionId === String(caller.id) && view.humanReview.note === note) return view
+    return this.review(id, verdict, String(caller.id), note)
   }
 
   async readArtifact(id: string, path: string, caller: Agent, position: ReadPosition): Promise<unknown> {
     const view = await this.status(id, caller)
     if (view.ownerSessionId !== String(caller.id)) throw new Error('test artifact requires the run owner')
     const absolute = await containedPath(view.runRoot, path)
-    const relativePath = relative(await realpath(view.runRoot), absolute)
+    const root = await realpath(view.runRoot)
+    const relativePath = relative(root, absolute)
     if (protectedPath(relativePath)) throw new Error('test artifact path is protected')
     const allowed = ['report.md', 'result.json', 'review.md', 'dsh.stdout.log', 'dsh.stderr.log',
-      ...view.humanReview.items.flatMap(item => item.artifacts.map(artifact => relative(view.runRoot, artifact.path))) ]
+      ...await Promise.all(view.humanReview.items.flatMap(item => item.artifacts.map(async artifact => relative(root, await realpath(artifact.path).catch(() => artifact.path))))) ]
     if (!allowed.includes(relativePath)) throw new Error('read only the report/result or a registered artifact from this run')
-    if (protectedPath(relative(view.runRoot, absolute))) throw new Error('test artifact symlink target is protected')
     return { runId: id, path: absolute, ...artifactPage(await readFile(absolute), position) }
   }
 
@@ -434,12 +444,12 @@ export class AgentTestService extends Service {
       return await this.status(id, caller)
     }
     const view = await this.status(id, caller)
-    if (view.status !== 'waiting-human' || view.result === undefined) return view
+    if (!['waiting-human', 'waiting-review'].includes(view.status) || view.result === undefined) return view
     view.result.status = 'cancelled'
     await atomicJson(join(view.runRoot, 'result.json'), view.result)
     await writeFile(join(view.runRoot, 'report.md'), reportMarkdown(view.result))
     if (active !== undefined) {
-      active.result = view.result; active.status = 'cancelled'; active.progress = 'Human validation cancelled'
+      active.result = view.result; active.status = 'cancelled'; active.progress = 'Artifact validation cancelled'
       this.updateProcess(active, { testStatus: 'cancelled', progress: active.progress })
       await active.processWrite
     }
@@ -503,7 +513,7 @@ export class AgentTestService extends Service {
     const view = active?.result === undefined ? await this.readCompleted(id) : this.publicView(active)
     const result = view.result
     if (result === undefined || result.status === 'cancelled' || !result.humanReview.required || result.humanReview.status !== 'pending') {
-      throw new Error(`agent test run is not waiting for human review: ${id}`)
+      throw new Error(`agent test run is not waiting for artifact review: ${id}`)
     }
     result.humanReview = {
       ...result.humanReview,
@@ -523,10 +533,17 @@ export class AgentTestService extends Service {
       active.result = result
       active.status = result.status
       active.humanReview = result.humanReview
-      active.progress = `human review: ${verdict}`
+      active.progress = `artifact review: ${verdict}`
       this.updateProcess(active, { testStatus: result.status, progress: active.progress })
       await active.processWrite
       return json(this.publicView(active))
+    }
+    const record = await this.readProcessRecord(runRoot)
+    if (record) {
+      record.process.testStatus = result.status
+      record.process.progress = `artifact review: ${verdict}`
+      await atomicJson(join(runRoot, 'dsh-process.json'), record)
+      if (record.ownerSessionId) this.processLists.set(record.ownerSessionId, upsertAgentTestProcess(this.processLists.get(record.ownerSessionId) ?? [], record.process))
     }
     return json(await this.readCompleted(id))
   }
@@ -562,7 +579,7 @@ export class AgentTestService extends Service {
         finishedAt: active.process?.finishedAt ?? result.finishedAt,
       })
       await active.processWrite
-      if (result.humanReview.required) {
+      if (result.humanReview.required && !active.planId) {
         try { await this.publishHumanReview(this.publicView(active)) } catch (error: unknown) {
           this.hostContext.logger.warn('agent-test: failed to publish human review for %s: %s', active.runId, errorText(error))
         }
@@ -641,7 +658,7 @@ export class AgentTestService extends Service {
       startedAt: result.startedAt,
       finishedAt: result.finishedAt,
       runRoot,
-      progress: result.status === 'waiting-human' ? 'automatic checks complete; waiting for human review' : `finished: ${result.status}`,
+      progress: result.status === 'waiting-review' ? 'Trainer artifact review ready' : result.status === 'waiting-human' ? 'automatic checks complete; waiting for human review' : `finished: ${result.status}`,
       humanReview: result.humanReview,
       ...(process === undefined ? {} : { process }),
       result,
@@ -650,13 +667,13 @@ export class AgentTestService extends Service {
 
   private async notifyCompleted(view: AgentTestRunView, owner?: Agent): Promise<void> {
     if (view.result === undefined || view.ownerSessionId === undefined || this.humanRequestService === undefined) return
-    await this.humanRequestService.deliverNotice(view.ownerSessionId, `agent-test:${view.runId}:completed`, `${completionOutput(view.result)}\nStatus: ${view.status}; automatic: ${view.automaticVerdict ?? 'unknown'}; human: ${view.humanReview.status}`, true, owner)
+    await this.humanRequestService.deliverNotice(view.ownerSessionId, `agent-test:${view.runId}:completed`, `${completionOutput(view.result)}\nStatus: ${view.status}; automatic: ${view.automaticVerdict ?? 'unknown'}; artifact review: ${view.humanReview.status}`, true, owner)
   }
 
   private async publishHumanReview(view: AgentTestRunView): Promise<void> {
     if (this.humanRequestService === undefined) throw new Error('human request service is unavailable')
-    if (!view.result?.humanReview.required || !view.ownerSessionId) return
-    await this.humanRequestService.submit({ requestId: `test-${view.runId}`, type: 'test-review', title: `验收 ${view.suite}`, body: reviewMarkdown(view.result) + '\n\n请答复“通过验收”或“未通过：原因”。', ...(view.planId ? { planId: view.planId } : {}) }, view.ownerSessionId)
+    if (view.planId || !view.result?.humanReview.required || !view.ownerSessionId) return
+    await this.humanRequestService.submit({ requestId: `test-${view.runId}`, type: 'test-review', title: `Review ${view.suite}`, body: reviewMarkdown(view.result) + '\n\nChoose Approve or Request changes, then submit your decision.', ...(view.planId ? { planId: view.planId } : {}) }, view.ownerSessionId)
   }
 
   private async readProcess(runRoot: string): Promise<AgentTestProcessView | undefined> {

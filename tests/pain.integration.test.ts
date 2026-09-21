@@ -112,15 +112,13 @@ it('mounts Trainer-only policy and completion tools and delivers through the rea
     const saved = await f.ctx.trainers.read(plan.id)
     expect(saved.sessionId).toBe(String(trainer.agent.id))
     expect(saved.painRefs?.[0]?.painId).toBe(pain.id)
-    const review = await f.callAs(trainer, 'human_request_submit', { type: 'training-plan-review', planId: plan.id, body: plan.body })
-    await f.ctx.humanRequests.respond(review.id, '同意，请继续。')
+    const review = await f.callAs(trainer, 'human_request_submit', { type: 'plan-review', planId: plan.id, body: plan.body })
+    await f.ctx.humanRequests.respond(review.id, '同意，请继续。', 'approve')
     const prepared = await f.callAs(trainer, 'trainer_workspace_prepare', { plan_id: plan.id })
     const { writeFile } = await import('node:fs/promises')
     const { join } = await import('node:path')
     await writeFile(join(prepared.workspace, 'agent.txt'), 'validated units\n')
-    const merge = await f.callAs(trainer, 'human_request_submit', { type: 'training-merge', planId: plan.id, body: 'Validated units', checks: [] })
-    await f.ctx.humanRequests.respond(merge.id, '批准合入本次修改。')
-    await f.callAs(trainer, 'trainer_merge', { request_id: merge.id })
+    await f.callAs(trainer, 'trainer_merge', { plan_id: plan.id, checks: ['test -s agent.txt'] })
     expect((await f.ctx.pains.engine.get(pain.id)).status).toBe('resolved')
 
   } finally {

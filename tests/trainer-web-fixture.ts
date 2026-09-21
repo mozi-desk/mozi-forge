@@ -40,6 +40,13 @@ defaults: { timeoutMs: 120000, repeat: 1 }
 cases:
   - id: output
     name: Writes the expected answer
+    review:
+      required: true
+      when: always
+      title: Assess result
+      instructions: Inspect the actual JSON answer against the plan.
+      checklist: [Answer is OK]
+      artifacts: [{ label: Result, path: result.json }]
     turns:
       - id: write
         prompt: Write the required result file.
@@ -103,8 +110,8 @@ cases:
       if (!value.result.ok) throw new Error(JSON.stringify(value.result.error))
       return value.result.value
     }
-    async function answer(id: string, body: string): Promise<void> {
-      const response=await api.fetch('/mozi-human-requests/respond',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:crypto.randomUUID(),method:'respond',payload:{id,body}})})
+    async function answer(id: string, body: string, decision: 'approve' | 'request-changes'): Promise<void> {
+      const response=await api.fetch('/mozi-human-requests/respond',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:crypto.randomUUID(),method:'respond',payload:{id,body,decision}})})
       const value=await response.json() as {result:{ok:boolean;error?:unknown}}
       if (!value.result.ok) throw new Error(JSON.stringify(value.result.error))
     }

@@ -17,6 +17,16 @@ export interface TrainingPlan {
   startSeq: number
   baseCommit?: string
   targetBranch?: string
-  merge?: { requestId: string; commit: string; targetBranch: string; mergedAt: string }
+  merge?: { tree: string; commit: string; targetBranch: string; mergedAt: string }
 }
 export interface PlanInput { sourceSessions?: Array<{ sessionId: string; revision: string }>; id?: string; title: string; description: string; body: string; tokenBudget?: number; iterationBudget?: number }
+
+/** Durable verified candidate; written before moving the destination branch. */
+export interface MergeSnapshot {
+  baseCommit: string
+  tree: string
+  targetBranch: string
+  checks: string[]
+  commit?: string
+  integratedCommit?: string
+}

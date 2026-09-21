@@ -15,7 +15,7 @@ through public Harness services; client bundles use the declared DSH client meta
 
 ## Behavior
 
-Store plans and Markdown proposals; prepare one HEAD worktree per plan. Require reviewed tree identity for integration and preserve destination changes.
+Store plans and Markdown proposals; prepare one HEAD worktree per plan. The human approves one plan describing what changes, why, and acceptance criteria. Trainer implements and assesses evaluation artifacts, then calls `trainer_merge(plan_id, checks, target_branch?)`. Host verifies the exact candidate in isolation, preserves destination changes and saves an idempotent integration receipt.
 
 See [Architecture](../../docs/architecture.md) and the
 [training tutorial](../../docs/training.md) for the full composition.
@@ -32,10 +32,7 @@ Root integration tests exercise shared services and the real Web execution path.
 
 ## Reporting to the human
 
-The persona opens with a reporting contract for a non-technical owner: every
-human-facing message leads with what will change for them and what they must
-choose, each decision offers two or three concrete options with one marked as
-recommended, the decision list is never built from internal identifiers or
+The persona opens with a reporting contract for a non-technical owner: the plan describes the observable changes, their reasons and acceptance criteria. Meaningful alternatives offer two or three concrete options with one marked as recommended; the decision list is never built from internal identifiers or
 infrastructure terms, and the owner is never asked to read or approve an internal
 document. Mechanical internals stay with Trainer; implementation detail appears
 only when the owner asks for it.
@@ -56,10 +53,10 @@ session receives `handoff: true` and ends its turn. The Host persists and starts
 one dedicated Trainer session with the prepared worktree as its immutable cwd.
 When the Host provides a workspace registry, the worktree is registered as
 `Training: <plan title>` for discovery in the Web workspace list.
-That session continues the existing Plan at proposal creation, using native tools
+That session continues the existing Plan at autonomous implementation, using native tools
 and child agents in the worktree. Repeated preparation returns the same identity;
 after Host recovery it resumes the saved session and preserves files and reviews.
-A pending human review keeps execution waiting for its answer.
+Workspace preparation requires approval of the current plan body. Updated scope requires a new plan decision.
 
 The Plan retains its analysis `sessionId` and records `executionSessionId`.
 Both identities can access the Plan; other sessions can read its public summary.
@@ -68,3 +65,11 @@ Plan review answers across the two sessions, and usage includes both sessions, e
 associated evaluations. Fork-inherited history is counted in its original session. Successful integration notifies the execution caller and
 the original analysis session. Session cwd and main-checkout files retain their
 normal Harness meanings throughout the handoff.
+
+### External session investigation
+
+The agent plugin accepts `sessionInvestigation`, a deployment-owned investigation
+workflow. When supplied, it replaces the default session investigation instructions
+and omits the local `session_inspect` tool. The deployment provides its investigation
+and import tools; `session_query` and `session_read` remain available for frozen
+evidence. Reflect tasks follow this configured workflow.

@@ -544,7 +544,7 @@ function reviewItems(suite: AgentTestSuite, attempts: readonly AgentTestAttemptR
 }
 
 export function reviewMarkdown(result: AgentTestRunResult): string {
-  const lines = [`# Human Review ${result.runId}`, '', `Status: ${result.humanReview.status}`, '']
+  const lines = [`# ${result.planId ? 'Agent' : 'Human'} Review ${result.runId}`, '', `Status: ${result.humanReview.status}`, '']
   for (const item of result.humanReview.items) {
     lines.push(`## ${item.caseId} repeat ${String(item.repeat)}: ${item.title}`, '', item.instructions, '')
     lines.push(...item.checklist.map(check => `- [ ] ${check}`), '', ...item.artifacts.map(artifact => `- ${artifact.label}: ${artifact.path}`), '')
@@ -565,7 +565,7 @@ export function reportMarkdown(result: AgentTestRunResult): string {
     `- Source digest: ${result.sourceDigest}`,
     `- Status: ${result.status}`,
     `- Automatic verdict: ${result.automaticVerdict}`,
-    `- Human verdict: ${result.humanReview.status}`,
+    `- ${result.planId ? 'Agent' : 'Human'} verdict: ${result.humanReview.status}`,
     `- Elapsed: ${String(result.metrics.elapsedMs)} ms`,
     `- LLM/tool/TTFT: ${String(result.metrics.llmMs)} / ${String(result.metrics.toolMs)} / ${String(result.metrics.ttftMs)} ms`,
     `- Tokens uncached/cache-read/cache-write/output: ${String(result.metrics.tokens.uncachedInputTokens)} / ${String(result.metrics.tokens.cacheReadTokens)} / ${String(result.metrics.tokens.cacheWriteTokens)} / ${String(result.metrics.tokens.outputTokens)}`,
@@ -588,7 +588,7 @@ export function reportMarkdown(result: AgentTestRunResult): string {
 }
 
 export function completionOutput(result: AgentTestRunResult): string {
-  return `Agent test ${result.suite}: ${result.status}.\nRun: ${result.runId}\nReport: ${join(dirname(result.snapshotRoot), 'report.md')}\n${result.humanReview.required ? '请在人类需求页面检查产物并答复。' : '根据证据继续训练。'}`
+  return `Agent test ${result.suite}: ${result.status}.\nRun: ${result.runId}\nReport: ${join(dirname(result.snapshotRoot), 'report.md')}\n${result.humanReview.required ? (result.planId ? 'Inspect the artifacts and record the verdict with agent_test_review.' : 'Review the artifacts and respond in Human requests.') : 'Continue training based on the evidence.'}`
 }
 
 export class AgentTestEngine {
@@ -637,11 +637,11 @@ export class AgentTestEngine {
       status: items.length > 0 ? 'pending' : 'not-required',
       items,
       ...(items.length === 0 ? {} : {
-        title: items.length === 1 ? items[0]!.title : `${String(items.length)} 项人工审查`,
+        title: items.length === 1 ? items[0]!.title : `${String(items.length)} artifact reviews`,
         instructions: items.map(item => item.instructions).join('\n\n'),
         checklist: items.flatMap(item => item.checklist),
         artifacts: items.flatMap(item => item.artifacts),
-        reviewCommand: `/agent-test review ${request.runId} pass --note "验收通过"`,
+        reviewCommand: request.planId ? `agent_test_review run_id=${request.runId}` : `/agent-test review ${request.runId} pass --note "Review passed"`,
       }),
     }
     const status = cancelled
@@ -649,7 +649,7 @@ export class AgentTestEngine {
       : automaticVerdict === 'failed'
         ? 'failed'
         : humanReview.required
-          ? 'waiting-human'
+          ? request.planId ? 'waiting-review' : 'waiting-human'
           : 'passed'
     const result: AgentTestRunResult = {
       version: 1,
@@ -673,7 +673,7 @@ export class AgentTestEngine {
       humanReview,
       ...(infrastructureError === undefined ? {} : { error: infrastructureError }),
     }
-    request.onProgress(status === 'waiting-human' ? 'automatic checks complete; waiting for human review' : `finished: ${status}`)
+    request.onProgress(status === 'waiting-review' ? 'automatic checks complete; Trainer artifact review ready' : status === 'waiting-human' ? 'automatic checks complete; waiting for human review' : `finished: ${status}`)
     await atomicJson(join(request.runRoot, 'result.json'), result)
     await writeFile(join(request.runRoot, 'report.md'), reportMarkdown(result))
     await writeFile(join(request.runRoot, 'review.md'), reviewMarkdown(result))

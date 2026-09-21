@@ -1,9 +1,9 @@
 /**
  * Purpose: Black-box Trainer tools, human answers and real Git integration.
- * Example: a reviewed tree becomes one local commit; changed trees and dirty checkouts
+ * Example: a verified tree becomes one local commit; changed verification trees and dirty checkouts
  * are rejected without losing source. All commits belong to disposable repositories.
  */
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -13,13 +13,14 @@ afterEach(async () => { for (const f of fixtures.splice(0)) await f.dispose() })
 async function setup() { const f = await fixture(); fixtures.push(f); return f }
 async function training(f: Awaited<ReturnType<typeof fixture>>) {
   const plan = await f.call('trainer_plan_save', { description: 'Improve the observed Agent behavior.', title: 'Improve agent', body: '## Goal\nImprove the response.' })
-  const review = await f.call('human_request_submit', { type: 'training-plan-review', planId: plan.id, body: plan.body })
-  await f.ctx.humanRequests.respond(review.id, '同意，请继续。')
+  const review = await f.call('human_request_submit', { type: 'plan-review', planId: plan.id, body: plan.body })
+  await f.ctx.humanRequests.respond(review.id, '同意，请继续。', 'approve')
   const { workspace } = await f.call('trainer_workspace_prepare', { plan_id: plan.id })
   return { plan, workspace }
 }
-async function proposal(f: Awaited<ReturnType<typeof fixture>>, id: string, checks: string[] = []) {
-  return f.call('human_request_submit', { type: 'training-merge', planId: id, title: 'Merge changes', body: 'Review the full diff.', checks })
+async function approve(f: Awaited<ReturnType<typeof fixture>>, plan: { id: string; body: string }, agent = f.handle) {
+  const request = await f.callAs(agent, 'human_request_submit', { type: 'plan-review', planId: plan.id, body: plan.body })
+  await f.ctx.humanRequests.respond(request.id, '', 'approve')
 }
 it('hands training to one execution session and uses native tools in its HEAD workspace', async () => {
   const f = await setup()
@@ -64,6 +65,7 @@ it('resumes the same durable execution session after the owning service restarts
 it('keeps concurrent plans in distinct native tool workspaces', async () => {
   const f = await setup(), first = await training(f), other = await f.createAgent()
   const second = await f.callAs(other, 'trainer_plan_save', { title: 'Second workspace', description: 'Isolate concurrent work.', body: 'Change only this plan.' })
+  await approve(f, second, other)
   const prepared = await f.callAs(other, 'trainer_workspace_prepare', { plan_id: second.id })
   const agent = f.ctx.agents.get(SessionId(prepared.executionSessionId))!
   await f.call('write', { file_path: 'isolation.txt', content: 'first' })
@@ -73,92 +75,104 @@ it('keeps concurrent plans in distinct native tool workspaces', async () => {
   await expect(readFile(join(f.root, 'isolation.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
   await expect(f.callAs(other, 'trainer_workspace_prepare', { plan_id: first.plan.id })).rejects.toThrow('another session')
 })
-it('requires human approval, integrates once and records completion only after Git succeeds', async () => {
-  const f = await setup(), { plan, workspace } = await training(f)
-  await writeFile(join(workspace, 'agent.txt'), 'improved\n')
-  const request = await proposal(f, plan.id)
-  expect((await f.ctx.humanRequests.read(request.id)).body).toContain('+improved')
-  await expect(f.call('trainer_merge', { request_id: request.id })).rejects.toThrow('approval')
-  expect((await f.ctx.trainers.read(plan.id)).merge).toBeUndefined()
-  await f.ctx.humanRequests.respond(request.id, '批准合入本次修改。')
-  const merged = await f.call('trainer_merge', { request_id: request.id })
+it('requires one plan decision and integrates autonomously with an idempotent receipt', async () => {
+  const f = await setup()
+  const plan = await f.call('trainer_plan_save', { title: 'Improve output', description: 'Fix observed output.', body: 'What: improve output. Why: incorrect output. Accept: output is improved.' })
+  await expect(f.call('trainer_workspace_prepare', { plan_id: plan.id })).rejects.toThrow('Plan approval')
+  const rejected = await f.call('human_request_submit', { type: 'plan-review', planId: plan.id, body: plan.body })
+  await f.ctx.humanRequests.respond(rejected.id, '', 'request-changes')
+  await expect(f.call('trainer_workspace_prepare', { plan_id: plan.id })).rejects.toThrow('Plan approval')
+  await approve(f, plan)
+  const { workspace } = await f.call('trainer_workspace_prepare', { plan_id: plan.id })
+  await writeFile(join(workspace, 'agent.txt'), 'improved')
+  const args = { plan_id: plan.id, checks: ['test "$(cat agent.txt)" = improved'] }
+  const merged = await f.call('trainer_merge', args)
   expect(await git(f.root, 'rev-parse', 'HEAD')).toBe(merged.merge.commit)
-  expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('improved\n')
-  await f.call('trainer_merge', { request_id: request.id })
+  expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('improved')
+  await f.call('trainer_merge', args)
+  expect(await git(f.root, 'rev-list', '--count', 'HEAD')).toBe('2')
+  expect((await f.ctx.humanRequests.list({ planId: plan.id })).every(r => r.type === 'plan-review')).toBe(true)
+  // Public persisted document models interruption between Git update and receipt write.
+  delete merged.merge
+  await writeFile(join(f.home, 'trainning', plan.id, 'plan.json'), JSON.stringify(merged))
+  await f.restartTrainer()
+  expect((await f.call('trainer_merge', args)).merge.commit).toBe(await git(f.root, 'rev-parse', 'HEAD'))
   expect(await git(f.root, 'rev-list', '--count', 'HEAD')).toBe('2')
 })
-it('protects rejected requests and changed reviewed content', async () => {
-  const f = await setup(), { plan, workspace } = await training(f)
-  await writeFile(join(workspace, 'agent.txt'), 'first')
-  const rejected = await proposal(f, plan.id)
-  await f.ctx.humanRequests.respond(rejected.id, '请调整：保留原有行为。')
-  await expect(f.call('trainer_merge', { request_id: rejected.id })).rejects.toThrow('approval')
-  const approved = await proposal(f, plan.id)
-  await f.ctx.humanRequests.respond(approved.id, '批准合入本次修改。')
-  await writeFile(join(workspace, 'agent.txt'), 'second')
-  await expect(f.call('trainer_merge', { request_id: approved.id })).rejects.toThrow('changed')
-  expect(await git(f.root, 'rev-list', '--count', 'HEAD')).toBe('1')
-})
-it('preserves dirty destination and integrates after it is clean', async () => {
+it('binds approval to the current scope and preserves a dirty destination', async () => {
   const f = await setup(), { plan, workspace } = await training(f)
   await writeFile(join(workspace, 'agent.txt'), 'improved')
-  const request = await proposal(f, plan.id)
-  await f.ctx.humanRequests.respond(request.id, '批准合入本次修改。')
+  const args = { plan_id: plan.id, checks: ['true'] }
+  const revised = await f.call('trainer_plan_save', { id: plan.id, title: plan.title, description: plan.description, body: 'Different acceptance criteria.' })
+  await expect(f.call('trainer_merge', args)).rejects.toThrow('Plan approval')
+  await approve(f, revised)
   await writeFile(join(f.root, 'agent.txt'), 'user work')
-  await expect(f.call('trainer_merge', { request_id: request.id })).rejects.toThrow('local changes')
+  await expect(f.call('trainer_merge', args)).rejects.toThrow('local changes')
   expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('user work')
   expect((await f.ctx.trainers.read(plan.id)).merge).toBeUndefined()
+  await writeFile(join(f.root, 'agent.txt'), 'baseline\n')
+  await f.call('trainer_merge', args)
+  expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('improved')
 })
 it('checks an advanced destination in isolation and preserves unrelated commits', async () => {
   const f = await setup(), { plan, workspace } = await training(f)
   await writeFile(join(workspace, 'agent.txt'), 'improved')
-  const request = await proposal(f, plan.id, ['test "$(cat agent.txt)" = improved'])
-  await f.ctx.humanRequests.respond(request.id, '批准合入本次修改。')
   await writeFile(join(f.root, 'other.txt'), 'new main work'); await git(f.root, 'add', '.'); await git(f.root, 'commit', '-m', 'advance')
-  await f.call('trainer_merge', { request_id: request.id })
+  await f.call('trainer_merge', { plan_id: plan.id, checks: ['test "$(cat agent.txt)" = improved', 'test "$(cat other.txt)" = "new main work"'] })
   expect(await readFile(join(f.root, 'other.txt'), 'utf8')).toBe('new main work')
   expect(await git(f.root, 'rev-list', '--count', 'HEAD')).toBe('3')
 })
-it('failed integration checks leave the destination unchanged', async () => {
+it.each([false, true])('failed checks leave the destination unchanged (advanced=%s)', async advanced => {
   const f = await setup(), { plan, workspace } = await training(f)
   await writeFile(join(workspace, 'agent.txt'), 'improved')
-  const request = await proposal(f, plan.id, ['exit 7'])
-  await f.ctx.humanRequests.respond(request.id, '批准合入本次修改。')
-  await writeFile(join(f.root, 'other.txt'), 'new'); await git(f.root, 'add', '.'); await git(f.root, 'commit', '-m', 'advance')
+  if (advanced) { await writeFile(join(f.root, 'other.txt'), 'new'); await git(f.root, 'add', '.'); await git(f.root, 'commit', '-m', 'advance') }
   const before = await git(f.root, 'rev-parse', 'HEAD')
-  await expect(f.call('trainer_merge', { request_id: request.id })).rejects.toThrow()
+  await expect(f.call('trainer_merge', { plan_id: plan.id, checks: [] })).rejects.toThrow('Verification commands')
+  await expect(f.call('trainer_merge', { plan_id: plan.id, checks: ['exit 7'] })).rejects.toThrow()
+  await expect(f.call('trainer_merge', { plan_id: plan.id, checks: ['printf changed > agent.txt'] })).rejects.toThrow()
   expect(await git(f.root, 'rev-parse', 'HEAD')).toBe(before)
   expect((await f.ctx.trainers.read(plan.id)).merge).toBeUndefined()
+  await f.call('trainer_merge', { plan_id: plan.id, checks: ['test "$(cat agent.txt)" = improved'] })
+  expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('improved')
 })
-it('recovers a Git update whose plan receipt was interrupted', async () => {
+it('requires the latest evaluation and artifact assessment to pass, including after recovery', async () => {
   const f = await setup(), { plan, workspace } = await training(f)
   await writeFile(join(workspace, 'agent.txt'), 'improved')
-  const request = await proposal(f, plan.id)
-  await f.ctx.humanRequests.respond(request.id, '批准合入本次修改。')
-  const merged = await f.call('trainer_merge', { request_id: request.id })
-  // Public persisted document models interruption between Git update and receipt write.
-  delete merged.merge
-  await writeFile(join(f.home, 'trainning', plan.id, 'plan.json'), JSON.stringify(merged))
-  expect((await f.call('trainer_merge', { request_id: request.id })).merge.commit).toBe(await git(f.root, 'rev-parse', 'HEAD'))
-  expect(await git(f.root, 'rev-list', '--count', 'HEAD')).toBe('2')
+  const runRoot = join(f.home, 'agent-tests/runs/20260921010101-1234abcd')
+  await mkdir(runRoot, { recursive: true })
+  const result = { version: 1, runId: '20260921010101-1234abcd', planId: plan.id, suite: 'acceptance', repeat: 1, startedAt: 1, finishedAt: 2, status: 'waiting-review', automaticVerdict: 'passed', humanReview: { required: true, status: 'pending', items: [] } }
+  await writeFile(join(runRoot, 'result.json'), JSON.stringify(result))
+  const args = { plan_id: plan.id, checks: ['test -s agent.txt'] }
+  await f.restartTrainer()
+  await expect(f.call('trainer_merge', args)).rejects.toThrow('Evaluation acceptance must pass')
+  await writeFile(join(runRoot, 'result.json'), JSON.stringify({ ...result, status: 'review-failed', humanReview: { ...result.humanReview, status: 'failed' } }))
+  await expect(f.call('trainer_merge', args)).rejects.toThrow('Evaluation acceptance must pass')
+  const nextRoot = join(f.home, 'agent-tests/runs/20260921010102-1234abcd')
+  await mkdir(nextRoot)
+  await writeFile(join(nextRoot, 'result.json'), JSON.stringify({ ...result, runId: '20260921010102-1234abcd', startedAt: 3, finishedAt: 4, status: 'passed', humanReview: { ...result.humanReview, status: 'passed' } }))
+  await f.call('trainer_merge', args)
+  expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('improved')
 })
-it('leaves conflicting branch changes intact and accepts a named detached destination', async () => {
+it('rejects source changes during verification without moving the target', async () => {
+  const f = await setup(), { plan, workspace } = await training(f)
+  await writeFile(join(workspace, 'agent.txt'), 'improved')
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+  await expect(f.call('trainer_merge', { plan_id: plan.id, checks: [`printf changed > ${quote(join(workspace, 'agent.txt'))}`] })).rejects.toThrow('Training content changed')
+  expect(await git(f.root, 'rev-list', '--count', 'HEAD')).toBe('1')
+})
+it('leaves conflicting changes intact and accepts a named detached destination', async () => {
   const f = await setup(), { plan, workspace } = await training(f)
   await writeFile(join(workspace, 'agent.txt'), 'training change')
-  const request = await proposal(f, plan.id, ['true'])
-  await f.ctx.humanRequests.respond(request.id, '批准合入本次修改。')
   await writeFile(join(f.root, 'agent.txt'), 'main change'); await git(f.root, 'add', '.'); await git(f.root, 'commit', '-m', 'conflict')
   const before = await git(f.root, 'rev-parse', 'HEAD')
-  await expect(f.call('trainer_merge', { request_id: request.id })).rejects.toThrow()
+  await expect(f.call('trainer_merge', { plan_id: plan.id, checks: ['true'] })).rejects.toThrow()
   expect(await git(f.root, 'rev-parse', 'HEAD')).toBe(before)
   expect(await readFile(join(f.root, 'agent.txt'), 'utf8')).toBe('main change')
   await git(f.root, 'checkout', '--detach')
   const next = await training(f)
   await writeFile(join(next.workspace, 'agent.txt'), 'detached improvement')
-  await expect(proposal(f, next.plan.id)).rejects.toThrow('target local branch')
-  const detachedRequest = await f.call('human_request_submit', { type: 'training-merge', planId: next.plan.id, targetBranch: 'main', body: 'Review detached changes.' })
-  await f.ctx.humanRequests.respond(detachedRequest.id, '批准合入本次修改。')
-  const result = await f.call('trainer_merge', { request_id: detachedRequest.id })
+  await expect(f.call('trainer_merge', { plan_id: next.plan.id, checks: ['true'] })).rejects.toThrow('target local branch')
+  const result = await f.call('trainer_merge', { plan_id: next.plan.id, target_branch: 'main', checks: ['true'] })
   expect(await git(f.root, 'rev-parse', 'refs/heads/main')).toBe(result.merge.commit)
   expect(await git(f.root, 'rev-parse', 'HEAD')).toBe(before)
 })
@@ -167,6 +181,7 @@ it('keeps allowance advisory and records uncertain token coverage', async () => 
   const plan = await f.call('trainer_plan_save', { description: 'Improve the observed Agent behavior.', title: 'Small allowance', body: 'One iteration.', tokenBudget: 1, iterationBudget: 1 })
   const brief = await f.call('trainer_plan_read', { plan_id: plan.id })
   expect(brief.usage.complete).toBe(false)
+  await approve(f, plan)
   await f.call('trainer_workspace_prepare', { plan_id: plan.id })
   expect((await f.call('bash', { command: 'exit 4' })).exitCode).toBe(4)
   await expect(f.call('bash', { command: 'printf still-available' })).resolves.toBeTruthy()
@@ -200,6 +215,7 @@ it('creates a plan with an explicit readable id and then updates that same plan'
   expect(Date.parse(created.createdAt)).toBeGreaterThan(0)
   expect(created.updatedAt).toBeUndefined()
   expect(JSON.parse(await readFile(join(f.home, 'trainning', 'named-training', 'plan.json'), 'utf8')).body).toContain('First revision.')
+  await approve(f, created)
   const prepared = await f.call('trainer_workspace_prepare', { plan_id: 'named-training' })
   expect(JSON.stringify(await f.call('bash', { command: 'pwd' }))).toContain(prepared.workspace)
   const updated = await f.call('trainer_plan_save', { id: 'named-training', description: 'Improve the observed Agent behavior.', title: 'Named plan v2', body: '## Goal\nSecond revision.' })
@@ -208,6 +224,7 @@ it('creates a plan with an explicit readable id and then updates that same plan'
   expect(updated.createdAt).toBe(created.createdAt)
   expect(Date.parse(updated.updatedAt)).toBeGreaterThanOrEqual(Date.parse(created.createdAt))
   expect(updated.baseCommit).toBe((await f.call('trainer_plan_read', { plan_id: 'named-training' })).plan.baseCommit)
+  await approve(f, updated)
   expect((await f.call('trainer_workspace_prepare', { plan_id: 'named-training' })).workspace).toBe(prepared.workspace)
 })
 

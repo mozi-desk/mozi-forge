@@ -1,12 +1,12 @@
 /**
- * Purpose: Save training plans, prepare HEAD worktrees and integrate human-approved trees.
+ * Purpose: Save training plans, prepare HEAD worktrees and integrate verified trees under approved plans.
  * Flow: the Agent chooses its loop; this service records filesystem/Git facts only.
  * A chosen plan id creates the plan on the first save and updates it in place afterwards,
  * preserving createdAt, workspace facts and the merge receipt.
- * Example: plan p1 creates workspace at HEAD, a human reviews its tree, merge writes
+ * Example: plan p1 creates workspace at HEAD, a human approves its objective, merge writes
  * one commit onto the recorded branch, and p1.merge becomes its completion receipt.
  * Recovery: saved commit identities make repeated integration safe. Dirty destination
- * checkouts and changed review trees fail without resetting user work. Branch movement
+ * checkouts and changed verification trees fail without resetting user work. Branch movement
  * is tested in a separate integration worktree before a compare-and-swap update.
  * Global Plan summaries support shared diagnosis; pain associations retain Plan ownership.
  * A merge receipt is saved before completion listeners reconcile the covered feedback.
@@ -29,11 +29,10 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import { atomicJson, safeId } from '@mozi-forge/human-request-plugin/host'
 import type {} from '@mozi-forge/agent-test-plugin/host'
 import { linkWorkcopyDependencies } from '@mozi-forge/agent-test-plugin/workcopy'
-import type { MergeSnapshot } from '@mozi-forge/human-request-plugin/types'
 import { deriveMetrics, hasCompleteUsage } from '@mozi-forge/agent-test-plugin/metrics'
 import type {} from '@mozi-forge/session-insights-plugin/host'
 import { parsePlan } from './plan.js'
-import type { TrainingPlan, PlanInput } from './types.js'
+import type { TrainingPlan, PlanInput, MergeSnapshot } from './types.js'
 export const name = 'mozi-trainer-host'
 export interface Config { projectRoot: string }
 export const Config: z<Config> = z.object({ projectRoot: z.string().required() })
@@ -91,6 +90,7 @@ export class TrainerService extends Service {
   async prepare(id: string, owner: string): Promise<{ plan: TrainingPlan; workspace: string; planDirectory: string; executionSessionId: string; handoff: boolean }> {
     return this.serial(id, async () => {
       const plan = await this.read(id, owner), workspace = this.workspace(id)
+      await this.requireApproval(plan)
       if (!plan.baseCommit) {
         plan.baseCommit = await this.git(this.projectRoot, ['rev-parse', 'HEAD'])
         const branch = await this.git(this.projectRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => undefined)
@@ -147,7 +147,7 @@ export class TrainerService extends Service {
       messageId = MessageId(`training-resume-${plan.id}-${events.findLast(event => event.type === 'turn/end')?.seq ?? 0}`)
       if (events.some(event => event.type === 'user/message' && event.data.id === messageId)) return
     }
-    const message = { ...createUserMessage({ source: { kind: 'plugin', plugin: name, form: 'notice', summary: `Execute training plan ${plan.id}` }, content: [{ type: 'text', text: `Execute the prepared Training Plan ${plan.id}. This is its dedicated execution session. Your workspace is ${this.workspace(plan.id)}. ${consumed ? 'Recover unfinished work from the saved proposals, evaluations and human answers.' : 'Continue from training loop step 3.'} Read trainer_plan_read first. Reuse this plan and its proposals. Human plan review and preparation are recorded below. Source-session proposals still require their own approval. Use native tools in this workspace and delegate implementation here.\nPlan: ${JSON.stringify(plan)}\nHuman requests: ${JSON.stringify(reviews)}\nsource_sessions=${JSON.stringify((plan.sourceSessions ?? []).map(ref => ref.sessionId))}` }] }), id: messageId }
+    const message = { ...createUserMessage({ source: { kind: 'plugin', plugin: name, form: 'notice', summary: `Execute training plan ${plan.id}` }, content: [{ type: 'text', text: `Execute the prepared Training Plan ${plan.id}. This is its dedicated execution session. Your workspace is ${this.workspace(plan.id)}. ${consumed ? 'Recover unfinished work from the saved proposals, evaluations and human answers.' : 'Continue from training loop step 4.'} Read trainer_plan_read first. Reuse this plan and its proposals. Human plan review and preparation are recorded below. Implement, evaluate artifacts and integrate autonomously within the approved scope. Use native tools in this workspace and delegate implementation here.\nPlan: ${JSON.stringify(plan)}\nHuman requests: ${JSON.stringify(reviews)}\nsource_sessions=${JSON.stringify((plan.sourceSessions ?? []).map(ref => ref.sessionId))}` }] }), id: messageId }
     if (!agent.inbox.nextTurn.some(pending => pending.id === messageId)) agent.send(message, 'next-turn', false)
     if (!await this.host.sessions.flush(agent.session)) throw new Error('TRAINER_PERSISTENCE_REQUIRED')
     agent.inbox.remove(messageId)
@@ -204,72 +204,86 @@ export class TrainerService extends Service {
     const known = histories.every(hasCompleteUsage)
     return { plan, workspace: plan.baseCommit ? this.workspace(id) : null, usage: { totalTokens, complete: known && tests.every(t => t.result !== undefined && t.result.attempts.length > 0 && t.result.attempts.every(a => a.usageComplete === true)), trainer: metrics.tokens }, requests: (await this.host.humanRequests.list({ planId: id })).map(r => ({ id: r.id, type: r.type, title: r.title, status: r.status, response: r.response })), evaluations: tests.map(t => ({ id: t.runId, status: t.status, path: t.runRoot })) }
   }
-  /** Capture the full review tree using a temporary index, preserving the Agent's index. */
-  async snapshot(id: string, owner: string, branch?: string, checks: string[] = []): Promise<{ merge: MergeSnapshot; body: string }> {
-    const plan = await this.read(id, owner)
-    if (!plan.baseCommit) throw new Error('Prepare the workspace first')
-    const targetBranch = plan.targetBranch ?? branch
-    if (!targetBranch) throw new Error('Ask the human to name the target local branch')
-    await this.git(this.projectRoot, ['check-ref-format', '--branch', targetBranch])
-    await this.git(this.projectRoot, ['rev-parse', '--verify', `refs/heads/${targetBranch}`])
-    const tree = await this.tree(id, plan.baseCommit)
-    await this.git(this.projectRoot, ['update-ref', `refs/mozi-training/${id}/${tree}`, tree])
-    const diff = await this.git(this.projectRoot, ['diff', '--stat', plan.baseCommit, tree])
-    if (!diff) throw new Error('No training changes to merge')
-    const full = await this.git(this.projectRoot, ['diff', '--no-ext-diff', '--binary', plan.baseCommit, tree])
-    return { merge: { baseCommit: plan.baseCommit, tree, targetBranch, checks }, body: `\n\n## 合入快照\nTree: ${tree}\n目标本地分支: ${targetBranch}\n\n检查命令：\n${checks.join('\n')}\n\n批准本次快照请答复：批准合入本次修改。\n\n## 完整 diff\n\`\`\`diff\n${full}\n\`\`\`\n` }
+  /** The approved Markdown is exactly the user-facing scope and acceptance criteria. */
+  private async requireApproval(plan: TrainingPlan): Promise<void> {
+    const requests = (await this.host.humanRequests.list({ planId: plan.id })).filter(request =>
+      request.type === 'plan-review' && (request.sessionId === plan.sessionId || request.sessionId === plan.executionSessionId)
+      && request.body === plan.body)
+    if (requests[0]?.response?.decision !== 'approve') throw new Error('Plan approval required')
+  }
+  /** A failed baseline can be superseded by a successful candidate in the same suite. */
+  private async requireEvaluations(id: string): Promise<void> {
+    const suites = new Set<string>()
+    for (const evaluation of await this.host.agentTests.list()) {
+      if (evaluation.planId !== id || suites.has(evaluation.suite)) continue
+      suites.add(evaluation.suite)
+      if (evaluation.status !== 'passed' || (evaluation.humanReview.required && evaluation.humanReview.status !== 'passed')) {
+        throw new Error(`Evaluation ${evaluation.suite} must pass before integration`)
+      }
+    }
   }
   /**
-   * Integrate only the explicitly approved tree. A temporary worktree checks advanced
-   * branches; the destination moves only after successful checks and clean status.
-   * Saved commit ids let a retry recognize a completed Git update before the receipt.
+   * Freeze a candidate and run its checks in an isolated integration worktree.
+   * Persist the candidate before moving Git; a retry recovers an interrupted receipt.
+   * Destination changes are preserved and a changed verification tree cannot land.
    */
-  async merge(requestId: string, owner: string): Promise<TrainingPlan> {
+  async merge(id: string, owner: string, checks: string[], branch?: string): Promise<TrainingPlan> {
     return this.serial('merge', async () => {
-      const request = await this.host.humanRequests.read(requestId)
-      if (request.sessionId !== owner || request.type !== 'training-merge' || !request.planId || !request.merge) throw new Error('Owned merge request required')
-      if (request.response?.body.trim() !== '批准合入本次修改。') throw new Error('Explicit human merge approval required')
-      const plan = await this.read(request.planId, owner), snapshot = request.merge
+      const plan = await this.read(id, owner)
       if (plan.merge) { for (const listener of this.mergeListeners) await listener(); return plan }
-      const targetRef = `refs/heads/${snapshot.targetBranch}`
-      let target = await this.git(this.projectRoot, ['rev-parse', targetRef])
-      const finish = async (commit: string): Promise<TrainingPlan> => {
-        plan.merge = { requestId, commit, targetBranch: snapshot.targetBranch, mergedAt: new Date().toISOString() }
+      await this.requireApproval(plan)
+      if (!plan.baseCommit) throw new Error('Prepare the workspace first')
+      const targetBranch = plan.targetBranch ?? branch
+      if (!targetBranch) throw new Error('Specify the target local branch')
+      await this.git(this.projectRoot, ['check-ref-format', '--branch', targetBranch])
+      const targetRef = `refs/heads/${targetBranch}`
+      const target = await this.git(this.projectRoot, ['rev-parse', '--verify', targetRef])
+      const snapshotPath = join(this.directory(id), 'integration.json')
+      let snapshot: MergeSnapshot | undefined = await readFile(snapshotPath, 'utf8').then(text => JSON.parse(text) as MergeSnapshot).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; return undefined })
+      const finish = async (commit: string, tree: string): Promise<TrainingPlan> => {
+        plan.merge = { tree, commit, targetBranch, mergedAt: new Date().toISOString() }
         await this.serial(plan.id, async () => { const latest = await this.read(plan.id); if (latest.painRefs) plan.painRefs = latest.painRefs; await atomicJson(join(this.directory(plan.id), 'plan.json'), plan) })
         for (const listener of this.mergeListeners) await listener()
-        await this.host.humanRequests.deliverNotice(owner, `training-merged:${plan.id}`, `Training Plan ${plan.title} 已完成，本地提交 ${commit}`, true)
-        if (owner !== plan.sessionId) await this.host.humanRequests.deliverNotice(plan.sessionId, `training-merged:${plan.id}`, `Training Plan ${plan.title} completed in execution session ${owner}, local commit ${commit}.`, true)
+        await this.host.humanRequests.deliverNotice(owner, `training-completed:${plan.id}`, `Plan ${plan.title} completed, local commit ${commit}`, true)
+        if (owner !== plan.sessionId) await this.host.humanRequests.deliverNotice(plan.sessionId, `training-completed:${plan.id}`, `Plan ${plan.title} completed in execution session ${owner}, local commit ${commit}.`, true)
         return plan
       }
-      if (snapshot.integratedCommit && await this.git(this.projectRoot, ['merge-base', '--is-ancestor', snapshot.integratedCommit, target]).then(() => true, () => false)) return finish(snapshot.integratedCommit)
-      if (await this.tree(plan.id, snapshot.baseCommit) !== snapshot.tree) throw new Error('Training content changed; submit a fresh merge request')
+      if (snapshot?.targetBranch === targetBranch && snapshot.integratedCommit && await this.git(this.projectRoot, ['merge-base', '--is-ancestor', snapshot.integratedCommit, target]).then(() => true, () => false)) return finish(snapshot.integratedCommit, snapshot.tree)
+      await this.requireEvaluations(id)
+      if (!checks.length || checks.some(command => !command.trim())) throw new Error('Verification commands required')
+      const tree = await this.tree(id, plan.baseCommit)
+      if (!await this.git(this.projectRoot, ['diff', '--stat', plan.baseCommit, tree])) throw new Error('No training changes to merge')
       const destination = (await this.worktrees()).find(w => w.branch === targetRef)
-      if (destination && await this.git(destination.path, ['status', '--porcelain'])) throw new Error('Target checkout has local changes; ask the human to handle them')
-      if (!snapshot.commit) {
-        snapshot.commit = await this.git(this.projectRoot, ['commit-tree', snapshot.tree, '-p', snapshot.baseCommit, '-m', `Trainer: ${plan.title}`])
-        await this.host.humanRequests.save(request)
-      }
-      let integrated = snapshot.commit
-      if (target !== snapshot.baseCommit) {
-        if (!snapshot.checks.length) throw new Error('Target advanced; submit a merge request with proposal verification commands')
-        const integration = join(this.directory(plan.id), `integration-${randomUUID()}`)
-        await this.git(this.projectRoot, ['worktree', 'add', '--detach', integration, target])
+      if (destination && await this.git(destination.path, ['status', '--porcelain'])) throw new Error('Target checkout has local changes; integration deferred')
+      snapshot = { baseCommit: plan.baseCommit, tree, targetBranch, checks }
+      snapshot.commit = await this.git(this.projectRoot, ['commit-tree', tree, '-p', plan.baseCommit, '-m', `Trainer: ${plan.title}`])
+      await atomicJson(snapshotPath, snapshot)
+      const integration = join(this.directory(plan.id), `integration-${randomUUID()}`)
+      await this.git(this.projectRoot, ['worktree', 'add', '--detach', integration, target])
+      try {
         await this.git(integration, ['cherry-pick', '--no-commit', snapshot.commit])
         const expectedTree = await this.git(integration, ['write-tree'])
-        for (const command of snapshot.checks) await run('bash', ['-c', command], { cwd: integration, timeout: 300000, maxBuffer: 1024 * 1024 })
+        await linkWorkcopyDependencies(this.workspace(id), integration)
+        for (const command of checks) await run('bash', ['-c', command], { cwd: integration, timeout: 300000, maxBuffer: 1024 * 1024 })
         await this.git(integration, ['diff', '--exit-code'])
-        const tree = await this.git(integration, ['write-tree'])
-        if (tree !== expectedTree) throw new Error('Integration checks changed reviewed source; submit a fresh request')
-        integrated = await this.git(this.projectRoot, ['commit-tree', tree, '-p', target, '-m', `Trainer: ${plan.title}`])
+        if (await this.git(integration, ['write-tree']) !== expectedTree) throw new Error('Integration checks changed verified source')
+        if (await this.tree(id, plan.baseCommit) !== tree) throw new Error('Training content changed during verification; retry integration')
+        const current = await this.read(id, owner)
+        if (current.body !== plan.body) throw new Error('Plan scope changed during verification; retry integration')
+        await this.requireApproval(current)
+        await this.requireEvaluations(id)
+        const integrated = await this.git(this.projectRoot, ['commit-tree', expectedTree, '-p', target, '-m', `Trainer: ${plan.title}`])
+        snapshot.integratedCommit = integrated
+        await atomicJson(snapshotPath, snapshot)
+        if (await this.git(this.projectRoot, ['rev-parse', targetRef]) !== target) throw new Error('Target moved during verification; retry integration')
+        if (destination) {
+          if (await this.git(destination.path, ['symbolic-ref', 'HEAD']) !== targetRef || await this.git(destination.path, ['status', '--porcelain'])) throw new Error('Target checkout changed during verification')
+          await this.git(destination.path, ['merge', '--ff-only', integrated])
+        } else await this.git(this.projectRoot, ['update-ref', targetRef, integrated, target])
+        return finish(integrated, tree)
+      } finally {
+        await this.git(this.projectRoot, ['worktree', 'remove', '--force', integration])
       }
-      snapshot.integratedCommit = integrated
-      await this.host.humanRequests.save(request)
-      if (await this.git(this.projectRoot, ['rev-parse', targetRef]) !== target) throw new Error('Target moved during verification; retry integration')
-      if (destination) {
-        if (await this.git(destination.path, ['symbolic-ref', 'HEAD']) !== targetRef || await this.git(destination.path, ['status', '--porcelain'])) throw new Error('Target checkout changed during verification')
-        await this.git(destination.path, ['merge', '--ff-only', integrated])
-      } else await this.git(this.projectRoot, ['update-ref', targetRef, integrated, target])
-      return finish(integrated)
     })
   }
   private async tree(id: string, base: string): Promise<string> {

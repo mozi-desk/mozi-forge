@@ -17,27 +17,27 @@ can set tool-call budgets, cancellation timeouts, repeats and review requirement
 
 1. Use an agent and identify sessions or feedback that demonstrate a concrete issue.
 2. Select Trainer and ask for an improvement plan tied to that evidence.
-3. Review the plan and each proposal through Human Request.
+3. Review one plan through Human Request: what will change, why, and how success will be accepted.
 4. Trainer prepares a Git worktree at the selected repository's HEAD and returns
-   an execution session ID. Continue training in that session: its native file,
+   an execution session ID. Training continues automatically in that session: its native file,
    shell, skill and delegation tools use the worktree. It evaluates a baseline,
-   edits the target and evaluates the same suite again.
-5. Inspect the result Markdown and evaluation artifacts before approving integration.
+   edits the target, evaluates the same suite again and assesses the actual artifacts against the approved criteria.
+5. Trainer runs final checks, integrates the verified candidate locally and reports the outcome. Result Markdown and evaluation artifacts remain available for inspection.
 
 A worktree starts from committed HEAD. Uncommitted main-checkout edits are not its
 training baseline. For a fresh checkout, prepare your own baseline commit before
-using the worktree workflow. Integration is bound to the reviewed Git tree and
+using the worktree workflow. Integration verifies the exact candidate in an isolated worktree and
 preserves unrelated destination changes.
 
 ## Deterministic acceptance example
 
 `pnpm exec vitest run tests/trainer.web.test.ts` exercises two source sessions,
-plan and proposal reviews, baseline failure, prompt improvement, passing evaluation,
-and reviewed integration across analysis and execution sessions. It also checks
+one plan approval, baseline failure, prompt improvement, Trainer artifact assessment,
+and autonomous integration across analysis and execution sessions. It also checks
 standard tool availability, worktree instructions and Skills, native file tools,
 and a delegated agent's working directory. It uses scripted model transport with real Web RPC,
 subprocesses and a disposable Git repository. It does not prove live-model quality.
 
 Evaluation state is written under `$DSH_HOME/agent-tests`; plan-associated evidence
 is under `$DSH_HOME/trainning/<plan-id>`. Stop or cancel through public Agent Test
-interfaces. Reports distinguish execution failure, automatic checks and human review.
+interfaces. Reports distinguish execution failure, automatic checks and artifact assessments.

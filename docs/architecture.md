@@ -13,17 +13,17 @@ flowchart TD
   I --> L[Sleep Loop]
   R --> T[Trainer Plan]
   L --> T
-  T --> Q[Human Request]
+  T --> Q[Human plan approval]
   Q --> W[Isolated Git worktree]
   W --> E[Agent Test]
-  E --> Q
-  Q --> M[Reviewed integration]
+  E --> A[Trainer artifact assessment]
+  A --> M[Verified local integration]
 ```
 
 Session Insights captures immutable revisions and bounded query/read responses.
 Pain persists feedback facts. Reflection and Sleep deliver work to Trainer.
 Trainer stores plans, proposals, evaluations and result Markdown. Human Request
-persists review replies before resuming the owning session. Agent Test copies
+persists plan decisions before resuming the owning session. Agent Test copies
 source and local dependencies into an isolated snapshot before starting Harness.
 Review Agent can inspect frozen material and return a structured assessment.
 

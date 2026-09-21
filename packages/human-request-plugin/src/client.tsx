@@ -11,25 +11,32 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { useEffect, useState, type JSX } from 'react'
 import Markdown from 'react-markdown'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import { presentRequest } from './presentation.js'
 import { en, zh, type RequestTranslate } from './locales.js'
-import type { HumanRequest } from './types.js'
+import type { HumanDecision, HumanRequest } from './types.js'
 export function RequestDetail({ item, rpc, onChanged, t = key => en[key] }: { item: HumanRequest; rpc: ClientConnectionRpc; onChanged(): void; t?: RequestTranslate }): JSX.Element {
-  const [answer, setAnswer] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false)
+  const presentation = presentRequest(item, t)
+  const needsDecision = item.type === 'plan-review' || item.type === 'test-review'
+  const needsConfirmation = needsDecision && !!item.response && !item.response.decision
+  const [decision, setDecision] = useState<HumanDecision>()
+  const [answer, setAnswer] = useState(item.response?.body ?? ''), [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const submit = async (): Promise<void> => {
     setBusy(true); setError('')
     try {
-      const result = await rpc.call('/mozi-human-requests', 'respond', { id: item.id, body: answer })
+      const result = await rpc.call('/mozi-human-requests', 'respond', { id: item.id, body: answer, ...(decision ? { decision } : {}) })
       if (!result.ok) throw new Error(result.error.message)
       onChanged()
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
   return <article style={{ padding: 20, minWidth: 0, overflowWrap: 'anywhere' }}>
-    <h2>{item.title}</h2><p>{item.type} · {item.createdAt}</p>
-    <Markdown>{item.body}</Markdown>
-    {item.response ? <><h3>{t('response')}</h3><Markdown>{item.response.body}</Markdown></> : <>
-      <p><button onClick={() => setAnswer(t(item.type === 'training-merge' ? 'approveMerge' : item.type === 'test-review' ? 'approveTest' : 'approveContinue'))}>{t('approve')}</button> <button onClick={() => setAnswer(t('adjustReply'))}>{t('adjust')}</button></p>
-      <textarea aria-label={t('response')} style={{ width: '100%', minHeight: 100 }} value={answer} onChange={e => setAnswer(e.currentTarget.value)} />
-      <button disabled={busy || !answer.trim()} onClick={() => void submit()}>{t('submit')}</button>
+    <h2>{presentation.title}</h2><p>{item.type} · {item.createdAt}</p>
+    <Markdown>{presentation.body}</Markdown>
+    {item.response && <><h3>{t('response')}</h3>{item.response.decision && <p>{t(item.response.decision === 'approve' ? 'approved' : 'changesRequested')}</p>}<Markdown>{item.response.body}</Markdown></>}
+    {(!item.response || needsConfirmation) && <>
+      {needsConfirmation && <p>{t('confirmDecision')}</p>}
+      <p><button aria-pressed={decision === 'approve'} disabled={busy} onClick={() => setDecision('approve')}>{t('approve')}</button> <button aria-pressed={decision === 'request-changes'} disabled={busy} onClick={() => setDecision('request-changes')}>{t('adjust')}</button></p>
+      <textarea readOnly={needsConfirmation} aria-label={t('response')} style={{ width: '100%', minHeight: 100 }} value={answer} onChange={e => setAnswer(e.currentTarget.value)} />
+      <button disabled={busy || (needsDecision ? !decision : !decision && !answer.trim())} onClick={() => void submit()}>{t('submit')}</button>
     </>}
     {error && <p role="alert">{error}</p>}
   </article>
@@ -54,7 +61,7 @@ export function HumanRequestView({ rpc, t = key => en[key] }: { rpc: ClientConne
     <select aria-label={t('status')} value={status} onChange={e => setStatus(e.currentTarget.value)}><option value="pending">{t('pending')}</option><option value="answered">{t('answered')}</option></select>
     {error && <p role="alert">{error}</p>}
     <div style={{ display: 'flex', flexWrap: 'wrap' }}><nav style={{ flex: '1 1 220px' }}>
-      {items.map(item => <button key={item.id} style={{ display: 'block', width: '100%', textAlign: 'left', padding: 12 }} onClick={() => setSelected(item.id)}>{item.title}<small style={{ display: 'block' }}>{item.type} · {item.createdAt}</small></button>)}
+      {items.map(item => <button key={item.id} style={{ display: 'block', width: '100%', textAlign: 'left', padding: 12 }} onClick={() => setSelected(item.id)}>{presentRequest(item, t).title}<small style={{ display: 'block' }}>{item.type} · {item.createdAt}</small></button>)}
       {!items.length && <p>{t('empty')}</p>}
     </nav><div style={{ flex: '3 1 400px', minWidth: 0 }}>{active && <RequestDetail t={t} key={active.id + active.status} item={active} rpc={rpc} onChanged={() => setRefresh(n => n + 1)} />}</div></div>
   </section>

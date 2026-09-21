@@ -31,3 +31,19 @@ it.each([{ dict: en, submit: 'Submit response', pending: 'Pending', empty: 'No r
   expect(answered).toContain('Original answer')
   expect(answered).not.toContain('<textarea')
 })
+
+it('localizes standalone test instructions while preserving evidence', () => {
+  const item = { id: 'review', type: 'test-review', sessionId: 'session', title: 'Review', status: 'pending' as const, createdAt: 'today', body: 'Evidence' }
+  const review = renderToStaticMarkup(<RequestDetail item={{ ...item, type: 'test-review', title: '验收 suite', body: 'Evidence\n\n请答复“通过验收”或“未通过：原因”。' }} rpc={{} as ClientConnectionRpc} onChanged={() => undefined} />)
+  expect(review).toContain('Review suite')
+  expect(review).toContain('Choose Approve or Request changes')
+  expect(review).not.toContain('验收')
+})
+
+it('shows explicit decision controls for an older plan reply', () => {
+  const html = renderToStaticMarkup(<RequestDetail item={{ id: 'old', type: 'plan-review', title: 'Review', body: 'Proposal', sessionId: 'one', status: 'answered', createdAt: 'today', response: { body: 'Original note', answeredAt: 'yesterday' } }} rpc={{} as ClientConnectionRpc} onChanged={() => undefined} />)
+  expect(html).toContain('Select a decision')
+  expect(html).toContain('aria-pressed="false"')
+  expect(html).toContain('readonly=""')
+  expect(html).toContain('Original note')
+})

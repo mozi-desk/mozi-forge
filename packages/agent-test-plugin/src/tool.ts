@@ -1,5 +1,5 @@
 /**
- * Purpose: Expose the seven public Agent Test tools with optional plan association.
+ * Purpose: Expose public Agent Test tools with optional plan association.
  * Example: agent_test_start(plan_id=p1) evaluates the owned training workspace;
  * status and read return bounded evidence while the process service owns execution.
  */
@@ -121,7 +121,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'agent_test_wait',
-    description: 'Wait up to a bounded timeout for automatic testing to finish, then return the run status including any human-review request.',
+    description: 'Wait up to a bounded timeout for automatic testing to finish, then return the run status including the artifact-review state.',
     parameters: {
       run_id: { type: 'string', required: true },
       timeout_ms: { type: 'integer', description: 'Defaults to 30000ms; validated as 1-600000.' },
@@ -152,6 +152,17 @@ export function apply(ctx: Context): void {
         ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }),
         ...(args.start_line === undefined ? {} : { startLine: args.start_line }), ...(args.line_count === undefined ? {} : { lineCount: args.line_count }),
       }))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'agent_test_review',
+    description: 'Record an evidence-based artifact assessment for your training evaluation. Inspect the registered artifacts against the approved acceptance criteria first.',
+    parameters: { run_id: { type: 'string', required: true }, verdict: { type: 'string', enum: ['pass', 'fail'], required: true }, note: { type: 'string', required: true } },
+    output,
+    async execute(args, exec) {
+      if (!exec.agent) throw new Error('Owner required')
+      return jsonValue(summary(await ctx.agentTests.reviewByAgent(args.run_id, args.verdict, exec.agent, args.note)))
     },
   }))
 

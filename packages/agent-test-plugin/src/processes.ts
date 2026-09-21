@@ -6,7 +6,7 @@ import { z } from 'zod'
 import type { AgentTestProcessRecord, AgentTestProcessView } from './types.js'
 
 const lifecycle = z.enum(['queued', 'starting', 'running', 'stopping', 'exited'])
-const testStatus = z.enum(['running', 'failed', 'waiting-human', 'passed', 'review-failed', 'cancelled'])
+const testStatus = z.enum(['running', 'failed', 'waiting-human', 'waiting-review', 'passed', 'review-failed', 'cancelled'])
 
 export const agentTestProcessSchema = z.object({
   runId: z.string(),

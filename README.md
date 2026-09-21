@@ -3,7 +3,7 @@
 A foundation for self-evolving AI agents, built on DeepSeek Harness.
 
 Forge combines session evidence, feedback collection, reflection, training plans,
-isolated evaluation, and human-reviewed integration. Agents propose improvements;
+human plan approval, isolated evaluation, and autonomous verified integration. Agents propose improvements;
 host services execute operations and preserve reviewable evidence.
 
 ## Quick start

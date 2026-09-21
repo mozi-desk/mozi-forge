@@ -2,8 +2,8 @@
  * Purpose: Exercise session-driven training through public Web APIs with a real or scripted model.
  * The synthetic target starts wrong, establishes a failed baseline, gets optimized,
  * passes the same eval and merges into a disposable Git branch after fixture approval.
- * Example: two source sessions produce one Plan and reviewed proposals; a scripted
- * revision request must be answered before the baseline starts.
+ * Example: two source sessions produce one approved Plan followed by autonomous implementation,
+ * artifact assessments and integration.
  * Human answers are explicitly test fixtures. Logs/receipts are retained as evidence;
  * credentials are handled only by the provider and startup exchange in memory.
  */
@@ -51,7 +51,7 @@ export async function verifyTraining(mock = false): Promise<void> {
     }
     const created=await f.api.sessions.create({cwd:f.root,agentPreset:'trainer'})
     const sessionId=created.result.value.sessionId
-    await f.api.sessions.prompt({sessionId,mode:'queue',content:[{type:'text',text:`source_sessions=${JSON.stringify(sourceIds)}\n这是临时 Git 仓库中的真实 Trainer 黑盒验收。先查询并分析这些 sessions，绑定 sourceSessions。每份 proposal 都需要人审通过再训练。请优化 fixture-target，使固定评测 fixture-target 的 result.json.answer 从 OLD 变为 OK。目标修改位于 config/presets/fixture-target/prompt.md，可以新增回归测试样例，保持固定评测断言。按完整训练流程：Plan 人审、HEAD worktree、proposal、修改前 agent eval baseline、修改后相同 agent eval、result.md、合入人审和 trainer_merge。额度 200000 tokens、2 次迭代。初始 baseline 失败是预期证据。worktree 从 HEAD 创建后需要 使用已链接的依赖运行 pnpm_config_verify_deps_before_run=false pnpm run build:trainer 准备依赖及构建。合入检查命令可用 grep -q OK config/presets/fixture-target/prompt.md。所有人工答复由明确标识的测试 fixture 通过公开 RPC 提供。请完成全部流程。`} ]})
+    await f.api.sessions.prompt({sessionId,mode:'queue',content:[{type:'text',text:`source_sessions=${JSON.stringify(sourceIds)}\n这是临时 Git 仓库中的真实 Trainer 黑盒验收。先查询并分析这些 sessions，绑定 sourceSessions。人类只审核准备改什么、为什么改、怎样验收，随后自主实现、评审测试产物并合入。请优化 fixture-target，使固定评测 fixture-target 的 result.json.answer 从 OLD 变为 OK。目标修改位于 config/presets/fixture-target/prompt.md，可以新增回归测试样例，保持固定评测断言。按完整训练流程：Plan 人审一次、HEAD worktree、内部实现记录、修改前 agent eval baseline、修改后相同 agent eval、agent_test_review、result.md 和 trainer_merge。额度 200000 tokens、2 次迭代。初始 baseline 失败是预期证据。worktree 从 HEAD 创建后需要 使用已链接的依赖运行 pnpm_config_verify_deps_before_run=false pnpm run build:trainer 准备依赖及构建。合入检查命令可用 grep -q OK config/presets/fixture-target/prompt.md。所有人工答复由明确标识的测试 fixture 通过公开 RPC 提供。请完成全部流程。`} ]})
     await writeFile(join(evidence,'fixture.json'),JSON.stringify({root:f.root,sessionId}))
     const deadline=Date.now()+(mock ? 3 : 12)*60*1000
     let completed: unknown
@@ -70,14 +70,10 @@ export async function verifyTraining(mock = false): Promise<void> {
       }
       for(const request of await f.requests()){
         if(!trainingSessions.has(request.sessionId))continue
-        const revise = mock && request.type === 'proposal-review' && !decisions.some(d => d.type === 'proposal-review')
-        if (revise) {
-          const planDirs = await readdir(join(f.home,'trainning'))
-          for (const id of planDirs) expect(await readdir(join(f.home,'trainning',id,'evaluations'))).toEqual([])
-          expect(await readFile(join(f.root,'config/presets/fixture-target/prompt.md'),'utf8')).toContain('OLD')
-        }
-        const body=revise?'FIXTURE_REVISION_REQUIRED 请补充固定断言与两个来源的证据，重新送审。':request.type==='training-merge'?'批准合入本次修改。':request.type==='test-review'?'通过验收':'同意，请继续。这是自动化测试 fixture 的人工答复。'
-        decisions.push({id:request.id,type:request.type,body});await f.answer(request.id,body)
+        expect(request.type).toBe('plan-review')
+        expect(decisions).toHaveLength(0)
+        const body = 'Reviewed what changes, why, and the acceptance criteria.'
+        decisions.push({id:request.id,type:request.type,body});await f.answer(request.id,body,'approve')
       }
       const ids=await readdir(join(f.home,'trainning')).catch(()=>[])
       for(const id of ids){const plan=JSON.parse(await readFile(join(f.home,'trainning',id,'plan.json'),'utf8'));if(plan.merge)completed=plan}
@@ -91,7 +87,7 @@ export async function verifyTraining(mock = false): Promise<void> {
       for (const name of await readdir(join(f.home,'trainning',id,'proposals')).catch(()=>[])) proposals.push(await readFile(join(f.home,'trainning',id,'proposals',name),'utf8'))
       for(const testId of await readdir(join(f.home,'trainning',id,'evaluations')).catch(()=>[])){
         const result=await readFile(join(f.home,'trainning',id,'evaluations',testId,'result.json'),'utf8').then(JSON.parse).catch(()=>null)
-        if(result)results.push({id:result.runId,verdict:result.automaticVerdict,sourceDigest:result.sourceDigest,metrics:result.metrics})
+        if(result)results.push({id:result.runId,verdict:result.automaticVerdict,sourceDigest:result.sourceDigest,metrics:result.metrics,status:result.status,review:result.humanReview})
       }
     }
     await writeFile(join(evidence,'evidence.json'),JSON.stringify({fixture:f.root,completed,decisions,results},null,2))
@@ -109,9 +105,11 @@ export async function verifyTraining(mock = false): Promise<void> {
       expect(await realpath((await readFile(join(workspace, 'delegated-workspace.txt'), 'utf8')).trim())).toBe(await realpath(workspace))
     }
     expect((completed as {sourceSessions: Array<{sessionId:string}>}).sourceSessions.map(ref=>ref.sessionId).sort()).toEqual([...sourceIds].sort())
-    expect(decisions.filter(d=>d.type==='proposal-review').length).toBeGreaterThanOrEqual(mock ? 2 : 1)
+    expect(decisions).toHaveLength(1)
+    expect(decisions[0]?.type).toBe('plan-review')
     expect(proposals.length).toBeGreaterThanOrEqual(mock ? 2 : 1)
-    if (mock) { expect(decisions.filter(d=>d.type==='proposal-review')).toHaveLength(3); expect(proposals.join('\n')).toContain('Revision:') }
+    expect(results.every(r => r.review.status === 'passed' || r.review.status === 'failed')).toBe(true)
+    expect(results.some(r => r.status === 'passed' && r.review.reviewedBySessionId === executionId)).toBe(true)
     const history = sessionEvents(await f.api.sessions.history({ sessionId, maxMessages: 100 }))
     const calls = history.filter(e=>e.type==='tool/call').map(e=>e.data.name)
     expect(calls.indexOf('session_inspect')).toBeLessThan(calls.indexOf('trainer_plan_save'))
