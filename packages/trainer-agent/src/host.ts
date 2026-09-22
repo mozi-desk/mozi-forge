@@ -141,20 +141,45 @@ export class TrainerService extends Service {
     }
   }
   /**
-   * Install dependencies in each repository root that declares a lock file.
+   * Install and build each repository root of a composite workspace.
    *
-   * A superproject workspace is self-contained, so a real install is the only preparation that
-   * resolves the `file:../<sibling>` dependencies a worktree of this shape relies on. Roots
-   * without a lock file (the superproject root itself) are skipped. Failures propagate: a
-   * silent partial install would surface much later as a confusing missing-module error.
+   * A mount is a clean worktree of a branch, so it has neither installed dependencies nor build
+   * output. Installing is the only preparation that resolves the `file:../<sibling>` dependencies
+   * this layout relies on, and building is what makes the packages those siblings publish over
+   * their `exports` maps actually loadable — without it every consumer fails on a missing dist
+   * file. Roots without a lock file (the superproject root itself) are skipped; failures
+   * propagate, because a silent partial preparation surfaces much later as a confusing error.
    */
   private async install(workspace: string, pinned: Array<{ path: string }>): Promise<void> {
-    const roots = pinned.length ? pinned.map(({ path }) => join(workspace, path)) : [workspace]
-    for (const root of roots) {
+    for (const root of await this.orderedRoots(workspace, pinned)) {
       if (!await readFile(join(root, 'pnpm-lock.yaml'), 'utf8').catch(() => undefined)) continue
-      if (await realpath(join(root, 'node_modules')).catch(() => undefined)) continue
-      await run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], { cwd: root, timeout: 600000, maxBuffer: 16 * 1024 * 1024 })
+      // `--force` keeps this idempotent: a `file:` dependency is copied when it is installed, so a
+      // retry must refresh copies taken before the sibling was built. The frozen lockfile leaves
+      // the worktree free of generated diffs, and a warm store makes the pass sub-second.
+      await run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline', '--force'], { cwd: root, timeout: 600000, maxBuffer: 16 * 1024 * 1024 })
+      await run('pnpm', ['-r', '--if-present', 'run', 'build'], { cwd: root, timeout: 600000, maxBuffer: 16 * 1024 * 1024 })
     }
+  }
+  /**
+   * Order pinned projects so each installs after the siblings it resolves through `file:` paths.
+   *
+   * A `file:` dependency is copied into the consumer's store at install time, so installing a
+   * consumer before its sibling is built captures a package without build output. The declared
+   * `file:../<sibling>/...` paths give that order without another configuration source; a cycle
+   * falls back to declaration order, and the project's own build then reports the real problem.
+   */
+  private async orderedRoots(workspace: string, pinned: Array<{ path: string }>): Promise<string[]> {
+    if (!pinned.length) return [workspace]
+    const paths = pinned.map(({ path }) => path), edges = new Map<string, Set<string>>()
+    for (const path of paths) {
+      const root = join(workspace, path)
+      const text = (await readFile(join(root, 'package.json'), 'utf8').catch(() => '')) + (await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8').catch(() => ''))
+      edges.set(path, new Set([...text.matchAll(/file:\.\.\/([^/'"]+)/gu)].map(match => match[1]!).filter(dependency => dependency !== path && paths.includes(dependency))))
+    }
+    const ordered: string[] = [], seen = new Set<string>()
+    const visit = (path: string): void => { if (seen.has(path)) return; seen.add(path); for (const dependency of edges.get(path) ?? []) visit(dependency); ordered.push(path) }
+    for (const path of paths) visit(path)
+    return ordered.map(path => join(workspace, path))
   }
   /** Prepare once at HEAD; a retry returns the existing worktree without resetting it. */
   async prepare(id: string, owner: string): Promise<{ plan: TrainingPlan; workspace: string; planDirectory: string; executionSessionId: string; handoff: boolean }> {

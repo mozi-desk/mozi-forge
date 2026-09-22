@@ -19,8 +19,11 @@ A training root may be a superproject. When the root declares `.gitmodules`:
   sibling checkout. One object store per repository, sibling `file:` dependencies resolve, and
   the plan branch already lives where integration expects it. Submodule cloning is not used
   because a worktree-local clone would hide training commits from the repository that lands them.
-- Dependencies are installed with `pnpm install --frozen-lockfile --prefer-offline` inside every
-  pinned project, because only a real install resolves sibling paths in that layout.
+- Every pinned project is installed and built (`pnpm install --frozen-lockfile --prefer-offline
+  --force`, then `pnpm -r --if-present run build`) in the order its declared `file:../<sibling>/...`
+  paths imply. A real install is the only preparation that resolves sibling paths in that layout,
+  `--force` refreshes copies taken before their sibling was built, and building before installing a
+  consumer is what makes the published `exports` maps loadable.
 - `trainer_merge` refuses uncommitted submodule content, records each project's commit as a
   gitlink in the composite candidate, mounts the candidate commits in the verification worktree,
   and fast-forwards every pinned project before it moves the composite pointer. The receipt lists
@@ -46,8 +49,10 @@ impose the composite layout on every other user of those repositories.
   package unit tests pass; typecheck and lint are clean.
 - `packages/agent-test-plugin/tests/workcopy.test.ts`: a merge-verification shaped link now copies
   a dependency that resolves through an earlier snapshot (fails before the fix).
-- The local superproject was verified by creating a worktree, mounting the pinned projects,
-  running an install there and executing the trainer integration suite inside it.
+- The local superproject was verified by creating a worktree of `~/mozi`, mounting its three pinned
+  projects as worktrees of their real checkouts, installing and building them there, and running the
+  four training suites (40 tests, including the Web end-to-end one) inside that worktree with no
+  reference to the main checkouts and no dependency linking.
 
 ## Consequences
 
