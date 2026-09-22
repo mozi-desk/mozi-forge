@@ -10,7 +10,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { fixture, git } from './trainer-fixture.js'
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = []
 afterEach(async () => { for (const f of fixtures.splice(0)) await f.dispose() })
-async function setup() { const f = await fixture(); fixtures.push(f); return f }
+async function setup(options: { superproject?: boolean } = {}) { const f = await fixture(undefined, options); fixtures.push(f); return f }
 async function training(f: Awaited<ReturnType<typeof fixture>>) {
   const plan = await f.call('trainer_plan_save', { description: 'Improve the observed Agent behavior.', title: 'Improve agent', body: '## Goal\nImprove the response.' })
   const review = await f.call('human_request_submit', { type: 'plan-review', planId: plan.id, body: plan.body })
@@ -62,6 +62,30 @@ it('resumes the same durable execution session after the owning service restarts
   expect((await f.ctx.trainers.read(plan.id)).sessionId).toBe(String(f.handle.agent.id))
 })
 
+it('mounts a pinned submodule and integrates it before the superproject', async () => {
+  const f = await setup({ superproject: true })
+  const plan = await f.call('trainer_plan_save', { title: 'Composite change', description: 'Change a pinned project.', body: 'Change the pinned project.' })
+  await approve(f, plan)
+  const { workspace } = await f.call('trainer_workspace_prepare', { plan_id: plan.id })
+  const mount = join(workspace, 'pkg')
+  // The mount is a worktree of the real checkout on the plan branch, not a detached second clone.
+  expect(await git(mount, 'symbolic-ref', '--short', 'HEAD')).toBe(`trainer/${plan.id}`)
+  expect(await readFile(join(mount, 'dependency.txt'), 'utf8')).toBe('pinned\n')
+  expect(await git(join(f.root, 'pkg'), 'worktree', 'list', '--porcelain')).toContain(mount)
+
+  await writeFile(join(mount, 'dependency.txt'), 'changed\n')
+  await expect(f.call('trainer_merge', { plan_id: plan.id, checks: ['test -f pkg/dependency.txt'] })).rejects.toThrow('uncommitted changes')
+
+  await git(mount, 'add', '.'); await git(mount, 'commit', '-m', 'change pinned project')
+  const candidate = await git(mount, 'rev-parse', 'HEAD')
+  const merged = await f.call('trainer_merge', { plan_id: plan.id, checks: ['test "$(cat pkg/dependency.txt)" = changed'] })
+  expect(merged.merge.submodules).toEqual([{ path: 'pkg', sha: candidate }])
+  expect(await git(join(f.root, 'pkg'), 'rev-parse', 'main')).toBe(candidate)
+  expect(await readFile(join(f.root, 'pkg', 'dependency.txt'), 'utf8')).toBe('changed\n')
+  expect(await git(f.root, 'rev-parse', 'HEAD')).toBe(merged.merge.commit)
+  // Verification left no stale mount behind in the submodule repository.
+  expect(await git(join(f.root, 'pkg'), 'worktree', 'list', '--porcelain')).not.toContain('integration-')
+})
 it('keeps concurrent plans in distinct native tool workspaces', async () => {
   const f = await setup(), first = await training(f), other = await f.createAgent()
   const second = await f.callAs(other, 'trainer_plan_save', { title: 'Second workspace', description: 'Isolate concurrent work.', body: 'Change only this plan.' })

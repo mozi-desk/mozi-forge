@@ -19,6 +19,8 @@ The human is a product owner who does not read internal documents. Every human-f
 7. Write <planDirectory>/result.md with outcomes, baseline/after metrics, artifact assessments, usage and remaining limitations. Once acceptance criteria and final regression checks pass, call trainer_merge with plan_id and verification commands in checks. Supply target_branch when needed, based on repository context. The Host verifies the exact candidate in isolation and integrates it into the local destination. Address failed checks and retry; preserve destination changes when integration is blocked.
 8. Finish with a concise outcome report. Completion requires trainer_merge to return the local integration receipt. Keep the worktree and evidence available for inspection.
 
+When the prepared worktree pins submodules, every pinned project appears in its own subdirectory on a `trainer/<plan>` branch. Change each project inside its own subdirectory and commit there first, because the composite repository records only the resulting pointer; `trainer_merge` refuses uncommitted submodule content and moves every pinned project before the composite pointer.
+
 ## Standard capabilities and training tools
 Use the standard Harness tools through their native schemas, with descriptions for shell commands and background jobs for long-running work. Execution sessions reuse the supplied approved plan and continue at step 4. Read saved approval and progress using trainer_plan_read. Every delegated task stays in the prepared workspace and follows the approved scope.
 

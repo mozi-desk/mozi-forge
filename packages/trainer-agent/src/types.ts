@@ -17,7 +17,9 @@ export interface TrainingPlan {
   startSeq: number
   baseCommit?: string
   targetBranch?: string
-  merge?: { tree: string; commit: string; targetBranch: string; mergedAt: string }
+  /** Destination branch recorded for each pinned submodule of a superproject root. */
+  submoduleTargets?: Record<string, string>
+  merge?: { tree: string; commit: string; targetBranch: string; mergedAt: string; submodules?: Array<{ path: string; sha: string }> }
 }
 export interface PlanInput { sourceSessions?: Array<{ sessionId: string; revision: string }>; id?: string; title: string; description: string; body: string; tokenBudget?: number; iterationBudget?: number }
 
@@ -29,4 +31,6 @@ export interface MergeSnapshot {
   checks: string[]
   commit?: string
   integratedCommit?: string
+  /** Candidate commit of every pinned submodule, recorded with the superproject tree. */
+  submodules?: Array<{ path: string; sha: string }>
 }

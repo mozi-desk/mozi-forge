@@ -58,6 +58,8 @@ and child agents in the worktree. Repeated preparation returns the same identity
 after Host recovery it resumes the saved session and preserves files and reviews.
 For `human_request_submit(type=plan-review, planId=...)`, the Host checks Plan ownership and fills the displayed title and body from the saved Plan before persisting the request. The caller can use a short body identifying the review. Workspace preparation requires approval of that saved scope; updated scope requires a new plan decision. A review persisted before plan reviews carried the saved scope (the legacy `training-plan-review` type) still authorizes its Plan when the human recorded the `approve` decision and the Plan was not saved again after that answer; its Trainer-written body is accepted in place of body equality.
 
+A training root may be a composite checkout: when `.gitmodules` pins submodules, `trainer_workspace_prepare` mounts each pinned project as a worktree of its own repository on the plan branch (`trainer/<plan id>`) instead of cloning a second object store, and installs dependencies inside it. `trainer_merge` refuses uncommitted submodule content, freezes each project's commit in the composite tree, and fast-forwards every pinned project before it moves the composite pointer; the receipt records those commits. A root without `.gitmodules` keeps the single-repository behaviour.
+
 The Plan retains its analysis `sessionId` and records `executionSessionId`.
 Both identities can access the Plan; other sessions can read its public summary.
 Human requests belong to their submitting session. `trainer_plan_read` exposes

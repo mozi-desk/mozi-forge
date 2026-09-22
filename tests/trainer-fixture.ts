@@ -6,6 +6,9 @@
  * The separate Web test boots the complete generated standard Trainer preset.
  * Extra Agents can be created and driven through the same public tool executor so that
  * cross-session ownership rules stay testable without reaching into private state.
+ * `fixture(adapter, { superproject: true })` pins one nested repository as a submodule, so the
+ * composite-workspace path (mounts, gitlink candidates, per-repository integration) is exercised
+ * with the same public tools.
  */
 import { mkdtemp, writeFile, rm, mkdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -48,11 +51,21 @@ class QuietModel extends LlmAdapter {
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
-export async function fixture(adapter?: LlmAdapter) {
+export async function fixture(adapter?: LlmAdapter, options: { superproject?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'trainer-blackbox-')), home = join(root, '.runtime')
   await git(root, 'init', '-b', 'main'); await git(root, 'config', 'user.name', 'Trainer Test'); await git(root, 'config', 'user.email', 'trainer@example.invalid')
   await writeFile(join(root, '.gitignore'), '.runtime/\nnode_modules/\n')
   await writeFile(join(root, 'agent.txt'), 'baseline\n')
+  if (options.superproject) {
+    // A nested repository recorded as a gitlink: the trainer must mount it instead of cloning a
+    // second object store, and its own branch is where integration lands.
+    const nested = join(root, 'pkg')
+    await mkdir(nested, { recursive: true })
+    await git(nested, 'init', '-b', 'main'); await git(nested, 'config', 'user.name', 'Trainer Test'); await git(nested, 'config', 'user.email', 'trainer@example.invalid')
+    await writeFile(join(nested, 'dependency.txt'), 'pinned\n')
+    await git(nested, 'add', '.'); await git(nested, 'commit', '-m', 'nested baseline')
+    await writeFile(join(root, '.gitmodules'), '[submodule "pkg"]\n\tpath = pkg\n\turl = ./pkg\n')
+  }
   await git(root, 'add', '.'); await git(root, 'commit', '-m', 'fixture baseline')
   const previousHome = process.env.DSH_HOME; process.env.DSH_HOME = home
   const ctx = new Context()

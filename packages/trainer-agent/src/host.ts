@@ -93,6 +93,69 @@ export class TrainerService extends Service {
       return plan
     })
   }
+  /**
+   * Paths pinned by the root's `.gitmodules`, empty for a single-repository project.
+   *
+   * Logic: read the declarative file rather than `git submodule status`, because a freshly
+   * created worktree has no submodule checkout yet. Only the path is needed here; the pinned
+   * commit comes from the plan's own tree through `pinned`.
+   */
+  private async submodulePaths(): Promise<string[]> {
+    const text = await readFile(join(this.projectRoot, '.gitmodules'), 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; return '' })
+    return text.split('\n').flatMap(line => { const match = /^\s*path\s*=\s*(.+?)\s*$/u.exec(line); return match ? [match[1]!] : [] })
+  }
+  /** Commits pinned for the submodules of one tree, read from that tree's gitlinks. */
+  private async pinned(base: string): Promise<Array<{ path: string; sha: string }>> {
+    const result: Array<{ path: string; sha: string }> = []
+    for (const path of await this.submodulePaths()) result.push({ path, sha: await this.git(this.projectRoot, ['rev-parse', `${base}:${path}`]) })
+    return result
+  }
+  /**
+   * Mount pinned submodules as worktrees of their real checkouts under `workspace`.
+   *
+   * Logic: `git worktree add --detach` leaves submodules empty, and `git submodule update`
+   * would clone a second object store inside the worktree that the real repository cannot see.
+   * Mounting a worktree of the sibling checkout keeps one object store per repository, makes
+   * sibling `file:` dependencies resolvable, and lets a plan branch exist where integration
+   * expects it. With `branch` the mount carries that plan branch (created at the pinned commit
+   * when absent); without it the mount stays detached, which verification uses.
+   *
+   * Idempotency: an already registered mount is left untouched, so retrying prepare or merge
+   * never resets work in progress.
+   */
+  private async mount(workspace: string, pinned: Array<{ path: string; sha: string }>, branch?: string): Promise<void> {
+    for (const { path, sha } of pinned) {
+      const root = join(this.projectRoot, path), target = join(workspace, path)
+      if ((await this.worktrees(root)).some(worktree => worktree.path === target)) continue
+      if (!branch) { await this.git(root, ['worktree', 'add', '--detach', target, sha]); continue }
+      const exists = await this.git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).then(() => true, () => false)
+      await this.git(root, ['worktree', 'add', ...(exists ? [target, branch] : ['-b', branch, target, sha])])
+    }
+  }
+  /** Remove mounts created under `workspace` so no stale worktree survives the caller's cleanup. */
+  private async unmount(workspace: string, pinned: Array<{ path: string }>): Promise<void> {
+    for (const { path } of pinned) {
+      const root = join(this.projectRoot, path)
+      await this.git(root, ['worktree', 'remove', '--force', join(workspace, path)]).catch(() => undefined)
+      await this.git(root, ['worktree', 'prune']).catch(() => undefined)
+    }
+  }
+  /**
+   * Install dependencies in each repository root that declares a lock file.
+   *
+   * A superproject workspace is self-contained, so a real install is the only preparation that
+   * resolves the `file:../<sibling>` dependencies a worktree of this shape relies on. Roots
+   * without a lock file (the superproject root itself) are skipped. Failures propagate: a
+   * silent partial install would surface much later as a confusing missing-module error.
+   */
+  private async install(workspace: string, pinned: Array<{ path: string }>): Promise<void> {
+    const roots = pinned.length ? pinned.map(({ path }) => join(workspace, path)) : [workspace]
+    for (const root of roots) {
+      if (!await readFile(join(root, 'pnpm-lock.yaml'), 'utf8').catch(() => undefined)) continue
+      if (await realpath(join(root, 'node_modules')).catch(() => undefined)) continue
+      await run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], { cwd: root, timeout: 600000, maxBuffer: 16 * 1024 * 1024 })
+    }
+  }
   /** Prepare once at HEAD; a retry returns the existing worktree without resetting it. */
   async prepare(id: string, owner: string): Promise<{ plan: TrainingPlan; workspace: string; planDirectory: string; executionSessionId: string; handoff: boolean }> {
     return this.serial(id, async () => {
@@ -107,8 +170,19 @@ export class TrainerService extends Service {
       const registered = await this.worktrees()
       const actual = await realpath(workspace).catch(() => workspace)
       if (!registered.some(w => w.path === actual || w.path === workspace)) await this.git(this.projectRoot, ['worktree', 'add', '--detach', workspace, plan.baseCommit])
-      const lock = (root: string) => readFile(join(root, 'pnpm-lock.yaml'), 'utf8').catch((e: NodeJS.ErrnoException) => { if (e.code !== 'ENOENT') throw e; return undefined })
-      if (!await realpath(join(workspace, 'node_modules')).catch(() => undefined) && await lock(this.projectRoot) === await lock(workspace)) await linkWorkcopyDependencies(this.projectRoot, workspace)
+      const pinned = await this.pinned(plan.baseCommit)
+      if (pinned.length) {
+        if (!plan.submoduleTargets) {
+          plan.submoduleTargets = {}
+          for (const { path } of pinned) plan.submoduleTargets[path] = await this.git(join(this.projectRoot, path), ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => '')
+          await atomicJson(join(this.directory(id), 'plan.json'), plan)
+        }
+        await this.mount(workspace, pinned, `trainer/${id}`)
+        await this.install(workspace, pinned)
+      } else {
+        const lock = (root: string) => readFile(join(root, 'pnpm-lock.yaml'), 'utf8').catch((e: NodeJS.ErrnoException) => { if (e.code !== 'ENOENT') throw e; return undefined })
+        if (!await realpath(join(workspace, 'node_modules')).catch(() => undefined) && await lock(this.projectRoot) === await lock(workspace)) await linkWorkcopyDependencies(this.projectRoot, workspace)
+      }
       await mkdir(join(this.directory(id), 'proposals'), { recursive: true })
       await mkdir(join(this.directory(id), 'evaluations'), { recursive: true })
       if (!plan.executionSessionId) {
@@ -257,6 +331,35 @@ export class TrainerService extends Service {
     }
   }
   /**
+   * Fast-forward every pinned submodule to the verified candidate before the superproject moves.
+   *
+   * Logic: each mount is a worktree of the real submodule repository, so a plan branch already
+   * exists there and integration is an ordinary fast-forward of the recorded destination branch.
+   * Submodules move first so a partially integrated plan stays visible: the superproject pointer
+   * only moves once every submodule did, and the receipt is written last.
+   *
+   * Failure: an unrecorded destination branch, a diverged destination or a dirty destination
+   * checkout throws and leaves the remaining repositories untouched.
+   */
+  private async integrateSubmodules(plan: TrainingPlan, pinned: Array<{ path: string; sha: string }>): Promise<void> {
+    for (const { path, sha } of pinned) {
+      const root = join(this.projectRoot, path), branch = plan.submoduleTargets?.[path]
+      if (!branch) throw new Error(`Specify the target local branch for submodule ${path}`)
+      const ref = `refs/heads/${branch}`
+      const current: string | undefined = await this.git(root, ['rev-parse', '--verify', '--quiet', ref]).catch(() => undefined)
+      if (current === sha) continue
+      if (current && await this.git(root, ['merge-base', '--is-ancestor', current, sha]).then(() => true, () => false)) {
+        const destination = (await this.worktrees(root)).find(worktree => worktree.branch === ref)
+        if (destination && await this.git(destination.path, ['status', '--porcelain'])) throw new Error(`Submodule ${path} checkout has local changes; integration deferred`)
+        if (destination) await this.git(destination.path, ['merge', '--ff-only', sha])
+        else await this.git(root, ['update-ref', ref, sha, current])
+        continue
+      }
+      if (current) throw new Error(`Submodule ${path} cannot fast-forward to ${sha}`)
+      await this.git(root, ['update-ref', ref, sha])
+    }
+  }
+  /**
    * Freeze a candidate and run its checks in an isolated integration worktree.
    * Persist the candidate before moving Git; a retry recovers an interrupted receipt.
    * Destination changes are preserved and a changed verification tree cannot land.
@@ -275,7 +378,7 @@ export class TrainerService extends Service {
       const snapshotPath = join(this.directory(id), 'integration.json')
       let snapshot: MergeSnapshot | undefined = await readFile(snapshotPath, 'utf8').then(text => JSON.parse(text) as MergeSnapshot).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; return undefined })
       const finish = async (commit: string, tree: string): Promise<TrainingPlan> => {
-        plan.merge = { tree, commit, targetBranch, mergedAt: new Date().toISOString() }
+        plan.merge = { tree, commit, targetBranch, mergedAt: new Date().toISOString(), ...(snapshot?.submodules?.length ? { submodules: snapshot.submodules } : {}) }
         await this.serial(plan.id, async () => { const latest = await this.read(plan.id); if (latest.painRefs) plan.painRefs = latest.painRefs; await atomicJson(join(this.directory(plan.id), 'plan.json'), plan) })
         for (const listener of this.mergeListeners) await listener()
         await this.host.humanRequests.deliverNotice(owner, `training-completed:${plan.id}`, `Plan ${plan.title} completed, local commit ${commit}`, true)
@@ -286,10 +389,17 @@ export class TrainerService extends Service {
       await this.requireEvaluations(id)
       if (!checks.length || checks.some(command => !command.trim())) throw new Error('Verification commands required')
       const tree = await this.tree(id, plan.baseCommit)
+      // A gitlink records only the submodule's commit, so uncommitted submodule work would be
+      // dropped from the candidate without a trace. Compare each mount with the frozen tree and
+      // refuse dirty content, so the caller commits inside the submodule first.
+      for (const { path, sha } of await this.pinned(tree)) {
+        const mount = join(this.workspace(id), path)
+        if (await this.git(mount, ['rev-parse', 'HEAD']) !== sha || await this.git(mount, ['status', '--porcelain'])) throw new Error(`Submodule ${path} has uncommitted changes; commit inside it before integration`)
+      }
       if (!await this.git(this.projectRoot, ['diff', '--stat', plan.baseCommit, tree])) throw new Error('No training changes to merge')
       const destination = (await this.worktrees()).find(w => w.branch === targetRef)
       if (destination && await this.git(destination.path, ['status', '--porcelain'])) throw new Error('Target checkout has local changes; integration deferred')
-      snapshot = { baseCommit: plan.baseCommit, tree, targetBranch, checks }
+      snapshot = { baseCommit: plan.baseCommit, tree, targetBranch, checks, submodules: await this.pinned(tree) }
       snapshot.commit = await this.git(this.projectRoot, ['commit-tree', tree, '-p', plan.baseCommit, '-m', `Trainer: ${plan.title}`])
       await atomicJson(snapshotPath, snapshot)
       const integration = join(this.directory(plan.id), `integration-${randomUUID()}`)
@@ -297,7 +407,10 @@ export class TrainerService extends Service {
       try {
         await this.git(integration, ['cherry-pick', '--no-commit', snapshot.commit])
         const expectedTree = await this.git(integration, ['write-tree'])
-        await linkWorkcopyDependencies(this.workspace(id), integration)
+        if (snapshot.submodules?.length) {
+          await this.mount(integration, snapshot.submodules)
+          await this.install(integration, snapshot.submodules)
+        } else await linkWorkcopyDependencies(this.workspace(id), integration)
         for (const command of checks) await run('bash', ['-c', command], { cwd: integration, timeout: 300000, maxBuffer: 1024 * 1024 })
         await this.git(integration, ['diff', '--exit-code'])
         if (await this.git(integration, ['write-tree']) !== expectedTree) throw new Error('Integration checks changed verified source')
@@ -306,16 +419,19 @@ export class TrainerService extends Service {
         if (current.body !== plan.body) throw new Error('Plan scope changed during verification; retry integration')
         await this.requireApproval(current)
         await this.requireEvaluations(id)
+        if (await this.git(this.projectRoot, ['rev-parse', targetRef]) !== target) throw new Error('Target moved during verification; retry integration')
+        // Check the superproject checkout before moving any submodule, because advancing a
+        // submodule makes that checkout look dirty until its own pointer commit lands.
+        if (destination && (await this.git(destination.path, ['symbolic-ref', 'HEAD']) !== targetRef || await this.git(destination.path, ['status', '--porcelain']))) throw new Error('Target checkout changed during verification')
+        await this.integrateSubmodules(plan, snapshot.submodules ?? [])
         const integrated = await this.git(this.projectRoot, ['commit-tree', expectedTree, '-p', target, '-m', `Trainer: ${plan.title}`])
         snapshot.integratedCommit = integrated
         await atomicJson(snapshotPath, snapshot)
-        if (await this.git(this.projectRoot, ['rev-parse', targetRef]) !== target) throw new Error('Target moved during verification; retry integration')
-        if (destination) {
-          if (await this.git(destination.path, ['symbolic-ref', 'HEAD']) !== targetRef || await this.git(destination.path, ['status', '--porcelain'])) throw new Error('Target checkout changed during verification')
-          await this.git(destination.path, ['merge', '--ff-only', integrated])
-        } else await this.git(this.projectRoot, ['update-ref', targetRef, integrated, target])
+        if (destination) await this.git(destination.path, ['merge', '--ff-only', integrated])
+        else await this.git(this.projectRoot, ['update-ref', targetRef, integrated, target])
         return finish(integrated, tree)
       } finally {
+        if (snapshot.submodules?.length) await this.unmount(integration, snapshot.submodules)
         await this.git(this.projectRoot, ['worktree', 'remove', '--force', integration])
       }
     })
@@ -330,8 +446,8 @@ export class TrainerService extends Service {
       return await this.git(this.workspace(id), ['write-tree'], env)
     } finally { await rm(index, { force: true }) }
   }
-  private async worktrees(): Promise<Array<{ path: string; branch: string | undefined }>> {
-    const text = await this.git(this.projectRoot, ['worktree', 'list', '--porcelain'])
+  private async worktrees(root = this.projectRoot): Promise<Array<{ path: string; branch: string | undefined }>> {
+    const text = await this.git(root, ['worktree', 'list', '--porcelain'])
     return text.split('\n\n').map(block => ({ path: block.split('\n').find(l => l.startsWith('worktree '))?.slice(9) ?? '', branch: block.split('\n').find(l => l.startsWith('branch '))?.slice(7) }))
   }
   private async git(cwd: string, args: string[], env = process.env): Promise<string> {

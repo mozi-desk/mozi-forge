@@ -20,7 +20,9 @@
     - id: trainer-host
       name: '@mozi-forge/trainer-agent'
       config:
-        projectRoot: !!js process.cwd()
+        # A deployment may point training at a composite checkout whose submodules pin the
+        # projects under test; the default stays the working directory that launched the Host.
+        projectRoot: !!js process.env.TRAINER_PROJECT_ROOT ?? process.cwd()
 
 
 - insert:
