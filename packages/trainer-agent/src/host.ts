@@ -211,12 +211,39 @@ export class TrainerService extends Service {
     const known = histories.every(hasCompleteUsage)
     return { plan, workspace: plan.baseCommit ? this.workspace(id) : null, usage: { totalTokens, complete: known && tests.every(t => t.result !== undefined && t.result.attempts.length > 0 && t.result.attempts.every(a => a.usageComplete === true)), trainer: metrics.tokens }, requests: (await this.host.humanRequests.list({ planId: id })).map(r => ({ id: r.id, type: r.type, title: r.title, status: r.status, response: r.response })), evaluations: tests.map(t => ({ id: t.runId, status: t.status, path: t.runRoot })) }
   }
-  /** The approved Markdown is exactly the user-facing scope and acceptance criteria. */
+  /**
+   * The approved Markdown is exactly the user-facing scope and acceptance criteria.
+   *
+   * Logic:
+   * 1. Read this Plan's human requests and keep those owned by its analysis or execution
+   *    session; another session's answer never authorizes this Plan.
+   * 2. Accept a request only when the human recorded the structured `approve` decision, so a
+   *    free-text answer alone is never promoted into an approval.
+   * 3. For the current `plan-review` type, require the persisted request body to equal the saved
+   *    Plan body, because editing the Plan must invalidate its approval.
+   * 4. For the pre-upgrade `training-plan-review` type, accept the Trainer-written review text and
+   *    instead require that the Plan was not saved again after the answer; that timestamp is the
+   *    analogue of body equality for a record whose body cannot match the saved Plan body.
+   *
+   * External calls and effects:
+   * - `humanRequests.list` reads persisted request files for this Plan id only and writes
+   *   nothing, so a recheck during integration observes the same durable decisions.
+   *
+   * Failure: any reason to doubt the approval throws `Plan approval required`, keeping
+   * `trainer_workspace_prepare` and `trainer_merge` closed instead of starting unapproved work.
+   */
   private async requireApproval(plan: TrainingPlan): Promise<void> {
     const requests = (await this.host.humanRequests.list({ planId: plan.id })).filter(request =>
-      request.type === 'plan-review' && (request.sessionId === plan.sessionId || request.sessionId === plan.executionSessionId)
-      && request.body === plan.body)
-    if (requests[0]?.response?.decision !== 'approve') throw new Error('Plan approval required')
+      request.sessionId === plan.sessionId || request.sessionId === plan.executionSessionId)
+    const approved = requests.some(request => {
+      if (request.response?.decision !== 'approve') return false
+      if (request.type === 'plan-review') return request.body === plan.body
+      // Records written before plan reviews carried the saved Plan body keep the legacy type and
+      // the Trainer-written review text; saving that Plan again changes its scope and reopens review.
+      if (request.type === 'training-plan-review') return !plan.updatedAt || plan.updatedAt <= request.response.answeredAt
+      return false
+    })
+    if (!approved) throw new Error('Plan approval required')
   }
   /** A failed baseline can be superseded by a successful candidate in the same suite. */
   private async requireEvaluations(id: string): Promise<void> {

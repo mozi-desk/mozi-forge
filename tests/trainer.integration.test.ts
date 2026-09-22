@@ -99,6 +99,25 @@ it('requires one plan decision and integrates autonomously with an idempotent re
   expect((await f.call('trainer_merge', args)).merge.commit).toBe(await git(f.root, 'rev-parse', 'HEAD'))
   expect(await git(f.root, 'rev-list', '--count', 'HEAD')).toBe('2')
 })
+it('honours an approval recorded before plan reviews carried the saved body', async () => {
+  const f = await setup()
+  // Pre-upgrade records keep the legacy request type and a Trainer-written body, and only some of
+  // them carry a structured decision; both facts decide whether the Plan may start.
+  const answeredOnly = await f.call('trainer_plan_save', { title: 'Legacy answer', description: 'A free-text answer is not a decision.', body: '## Goal\nLegacy answer only.' })
+  const answerRequest = await f.call('human_request_submit', { type: 'training-plan-review', planId: answeredOnly.id, body: 'Review the plan and its evidence.' })
+  await f.ctx.humanRequests.respond(answerRequest.id, '同意，请继续。')
+  await expect(f.call('trainer_workspace_prepare', { plan_id: answeredOnly.id })).rejects.toThrow('Plan approval')
+
+  const plan = await f.call('trainer_plan_save', { title: 'Legacy approval', description: 'An upgrade-time approval stays valid.', body: '## Goal\nKeep the reviewed scope.' })
+  const legacy = await f.call('human_request_submit', { type: 'training-plan-review', planId: plan.id, body: 'Review the plan and its evidence.' })
+  expect((await f.ctx.humanRequests.read(legacy.id)).body).not.toBe(plan.body)
+  await f.ctx.humanRequests.respond(legacy.id, '人工裁决：批准按此范围继续。', 'approve')
+  expect((await f.call('trainer_workspace_prepare', { plan_id: plan.id })).workspace).toBeTruthy()
+
+  // Saving the same Plan again changes its scope, so the legacy approval no longer applies.
+  await f.call('trainer_plan_save', { id: plan.id, title: plan.title, description: plan.description, body: '## Goal\nA different scope.' })
+  await expect(f.call('trainer_workspace_prepare', { plan_id: plan.id })).rejects.toThrow('Plan approval')
+})
 it('binds approval to the current scope and preserves a dirty destination', async () => {
   const f = await setup(), { plan, workspace } = await training(f)
   await writeFile(join(workspace, 'agent.txt'), 'improved')
