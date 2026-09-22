@@ -1,9 +1,37 @@
-/** Isolated source copies and workspace-local dependency links. Example: createWorkcopy(repo, snapshot). */
+/**
+ * Purpose: Build an isolated copy of a project tree whose workspace packages resolve to the copy.
+ * Flow: `createWorkcopy` copies regular source (excluding `.git`, `node_modules`, `.runtime`,
+ * secrets and other generated state), then `linkWorkcopyDependencies` recreates every dependency
+ * link and copies dependencies that live outside the source.
+ *
+ * Important behavior: a dependency is "external" when its resolved real path leaves the source,
+ * sits under `node_modules` (the installed pnpm store), or sits under the source's own
+ * `.snapshot-packages` directory. The last case matters because a copy of a copy resolves such a
+ * dependency through the first copy's snapshot; unless it is copied again, the second copy links
+ * to an empty directory and the package no longer resolves.
+ *
+ * Example: `live` declares `@scope/ext: file:../external/pkg`.
+ *   createWorkcopy(live, candidate) → candidate/.snapshot-packages/@scope/ext holds the package
+ *   createWorkcopy(candidate, snapshot) → snapshot/.snapshot-packages/@scope/ext holds a fresh
+ *   copy and snapshot/node_modules/@scope/ext resolves, because the dependency was resolved
+ *   through candidate/.snapshot-packages and therefore classified external again.
+ *
+ * Edge case: workspace packages (`workspace:*`) keep pointing at the destination's own
+ * `packages/` directory, so each copy builds and tests its own source.
+ */
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, readdir, realpath, symlink } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 
+/** A dependency is external to the copied tree when it is not an in-repo path.
+ * `node_modules` links already point outside the copied source, and `.snapshot-packages`
+ * holds the copies an earlier workcopy made of external packages. Both must be copied
+ * again instead of being treated as a path the destination already contains; otherwise a
+ * workcopy of a workcopy links to an empty directory and the package cannot resolve. */
+function isExternalDependency(rel: string): boolean {
+  return rel.startsWith('..') || rel.split(sep).includes('node_modules') || rel.split(sep).includes('.snapshot-packages')
+}
 const excluded = new Set(['.git', '.runtime', '.pnpm-store', 'node_modules', 'coverage', '.cache', '.npmrc', '.DS_Store', '.credentials.yaml', '.credentials.yml', '.netrc', '.ssh', '.aws'])
 export function workcopyPath(path: string): boolean {
   return !path.split(/[\\/]/u).some(part => excluded.has(part) || part.startsWith('.env') || /\.(?:pem|key|p12)$/iu.test(part))
@@ -57,9 +85,9 @@ export async function linkWorkcopyDependencies(source: string, destination: stri
       if (typeof version !== 'string' || !/^(?:workspace:|file:|link:)/u.test(version) || sources.has(name)) continue
       const dependency = await resolvePackageDirectory(root, name)
       const rel = relative(source, dependency)
-      const internal = !rel.startsWith('..') && !rel.split(sep).includes('node_modules')
-      const target = internal ? join(destination, rel) : join(destination, '.snapshot-packages', ...name.split('/'))
-      if (!internal) await cp(dependency, target, { recursive: true, filter: async path => workcopyPath(relative(dependency, path)) && !(await lstat(path)).isSymbolicLink() })
+      const external = isExternalDependency(rel)
+      const target = external ? join(destination, '.snapshot-packages', ...name.split('/')) : join(destination, rel)
+      if (external) await cp(dependency, target, { recursive: true, filter: async path => workcopyPath(relative(dependency, path)) && !(await lstat(path)).isSymbolicLink() })
       await discover(dependency, target)
     }
   }
@@ -75,9 +103,8 @@ export async function linkWorkcopyDependencies(source: string, destination: stri
       if (entry.name.startsWith('@') && entry.isDirectory()) { await links(path, output, `${entry.name}/`); continue }
       const actual = await realpath(path)
       const rel = relative(source, actual)
-      const internal = !rel.startsWith('..') && !rel.split(sep).includes('node_modules')
       if (entry.name === '.bin') { await cp(path, output, { recursive: true }); continue }
-      await symlink(workspacePackages.get(`${scope}${entry.name}`) ?? (internal ? join(destination, rel) : actual), output, 'dir')
+      await symlink(workspacePackages.get(`${scope}${entry.name}`) ?? (isExternalDependency(rel) ? actual : join(destination, rel)), output, 'dir')
     }
   }
   await links(join(source, 'node_modules'), join(destination, 'node_modules'))
